@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	kubefloworgv1beta1 "github.com/kubeflow/notebooks/workspaces/controller/api/v1beta1"
 	"github.com/kubeflow/notebooks/workspaces/controller/internal/config"
@@ -325,6 +326,147 @@ var _ = Describe("Workspace Controller", func() {
 				},
 			}
 			_, err := reconciler.generateVirtualService(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("When generating a Gateway HTTPRoute for a Workspace", func() {
+
+		// Define utility variables for object names.
+		// NOTE: to avoid conflicts between parallel tests, resource names are unique to each test
+		var (
+			workspaceName     string
+			workspaceKindName string
+		)
+
+		// NOTE: these tests call the generate functions directly and do not create any
+		//       resources in the cluster, so no teardown is required.
+		var (
+			reconciler      *WorkspaceReconciler
+			workspace       *kubefloworgv1beta1.Workspace
+			workspaceKind   *kubefloworgv1beta1.WorkspaceKind
+			service         *corev1.Service
+			imageConfigSpec kubefloworgv1beta1.ImageConfigSpec
+		)
+
+		BeforeEach(func() {
+			uniqueName := "ws-httproute-test"
+			workspaceName = fmt.Sprintf("workspace-%s", uniqueName)
+			workspaceKindName = fmt.Sprintf("workspacekind-%s", uniqueName)
+
+			reconciler = &WorkspaceReconciler{
+				Config: &config.EnvConfig{
+					ClusterDomain:    "cluster.local",
+					RoutingProvider:  config.RoutingProviderGatewayAPI,
+					GatewayName:      "my-gateway",
+					GatewayNamespace: "istio-system",
+				},
+			}
+			workspaceKind = NewExampleWorkspaceKind1(workspaceKindName)
+			workspace = NewExampleWorkspace1(workspaceName, namespaceName, workspaceKindName)
+			service = &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ws-%s", workspaceName),
+					Namespace: namespaceName,
+				},
+			}
+			imageConfigSpec = workspaceKind.Spec.PodTemplate.Options.ImageConfig.Values[0].Spec
+		})
+
+		It("should attach to the configured Gateway", func() {
+			By("generating the HTTPRoute")
+			httpRoute, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the ParentRefs matches Gateway coordinates")
+			Expect(httpRoute.Spec.ParentRefs).To(HaveLen(1))
+			Expect(httpRoute.Spec.ParentRefs[0].Name).To(Equal(gatewayv1.ObjectName("my-gateway")))
+			Expect(httpRoute.Spec.ParentRefs[0].Namespace).NotTo(BeNil())
+			Expect(*httpRoute.Spec.ParentRefs[0].Namespace).To(Equal(gatewayv1.Namespace("istio-system")))
+		})
+
+		It("should not rewrite the URI when `removePathPrefix` is false", func() {
+			By("generating the HTTPRoute")
+			workspaceKind.Spec.PodTemplate.Ports[0].HTTPProxy.RemovePathPrefix = ptr.To(false)
+			httpRoute, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the HTTP route has no URLRewrite filter")
+			Expect(httpRoute.Spec.Rules).To(HaveLen(1))
+			for _, filter := range httpRoute.Spec.Rules[0].Filters {
+				Expect(filter.Type).NotTo(Equal(gatewayv1.HTTPRouteFilterURLRewrite))
+			}
+		})
+
+		It("should rewrite the URI to '/' when `removePathPrefix` is true", func() {
+			By("generating the HTTPRoute")
+			workspaceKind.Spec.PodTemplate.Ports[0].HTTPProxy.RemovePathPrefix = ptr.To(true)
+			httpRoute, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the HTTP route has URLRewrite filter to '/'")
+			Expect(httpRoute.Spec.Rules).To(HaveLen(1))
+			var rewriteFilter *gatewayv1.HTTPURLRewriteFilter
+			for _, filter := range httpRoute.Spec.Rules[0].Filters {
+				if filter.Type == gatewayv1.HTTPRouteFilterURLRewrite {
+					rewriteFilter = filter.URLRewrite
+				}
+			}
+			Expect(rewriteFilter).NotTo(BeNil())
+			Expect(rewriteFilter.Path).NotTo(BeNil())
+			Expect(rewriteFilter.Path.Type).To(Equal(gatewayv1.PrefixMatchHTTPPathModifier))
+			Expect(*rewriteFilter.Path.ReplacePrefixMatch).To(Equal("/"))
+		})
+
+		It("should not rewrite the URI when `httpProxy` is not set", func() {
+			By("generating the HTTPRoute")
+			workspaceKind.Spec.PodTemplate.Ports[0].HTTPProxy = nil
+			httpRoute, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the HTTP route has no URLRewrite filter")
+			Expect(httpRoute.Spec.Rules).To(HaveLen(1))
+			for _, filter := range httpRoute.Spec.Rules[0].Filters {
+				Expect(filter.Type).NotTo(Equal(gatewayv1.HTTPRouteFilterURLRewrite))
+			}
+		})
+
+		It("should render go templates in `requestHeaders` values", func() {
+			By("generating the HTTPRoute")
+			workspaceKind.Spec.PodTemplate.Ports[0].HTTPProxy.RequestHeaders = &kubefloworgv1beta1.IstioHeaderOperations{
+				Set: map[string]string{
+					"X-RStudio-Root-Path": `{{ httpPathPrefix "jupyterlab" }}`,
+				},
+			}
+			httpRoute, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("checking the RequestHeaderModifier filter set values")
+			Expect(httpRoute.Spec.Rules).To(HaveLen(1))
+			var headerFilter *gatewayv1.HTTPHeaderFilter
+			for _, filter := range httpRoute.Spec.Rules[0].Filters {
+				if filter.Type == gatewayv1.HTTPRouteFilterRequestHeaderModifier {
+					headerFilter = filter.RequestHeaderModifier
+				}
+			}
+			Expect(headerFilter).NotTo(BeNil())
+			var setHeaderVal string
+			for _, header := range headerFilter.Set {
+				if header.Name == "X-RStudio-Root-Path" {
+					setHeaderVal = header.Value
+				}
+			}
+			Expect(setHeaderVal).To(Equal(getWorkspaceConnectPath(workspace.Namespace, workspace.Name, "jupyterlab")))
+		})
+
+		It("should fail to generate when a `requestHeaders` value has an invalid go template", func() {
+			By("generating the HTTPRoute")
+			workspaceKind.Spec.PodTemplate.Ports[0].HTTPProxy.RequestHeaders = &kubefloworgv1beta1.IstioHeaderOperations{
+				Set: map[string]string{
+					"X-RStudio-Root-Path": `{{ httpPathPrefix 'jupyterlab' }}`,
+				},
+			}
+			_, err := reconciler.generateGatewayHTTPRoute(workspace, workspaceKind, service, imageConfigSpec)
 			Expect(err).To(HaveOccurred())
 		})
 	})

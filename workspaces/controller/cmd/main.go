@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"strconv"
 
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	kubefloworgv1beta1 "github.com/kubeflow/notebooks/workspaces/controller/api/v1beta1"
 	"github.com/kubeflow/notebooks/workspaces/controller/internal/config"
@@ -58,6 +60,8 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(istiov1.AddToScheme(scheme))
+
+	utilruntime.Must(gatewayv1.AddToScheme(scheme))
 
 	utilruntime.Must(kubefloworgv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
@@ -89,13 +93,47 @@ func main() {
 	flag.StringVar(&cfg.ClusterDomain, "cluster-domain", getEnvAsStr("CLUSTER_DOMAIN", "cluster.local"),
 		"The domain to use for the Istio VirtualService")
 	flag.BoolVar(&cfg.UseIstio, "use-istio", getEnvAsBool("USE_ISTIO", false),
-		"If set, Istio will be used")
+		"If set, Istio will be used (deprecated, use --routing-provider instead)")
+	flag.StringVar(&cfg.RoutingProvider, "routing-provider", getEnvAsStr("ROUTING_PROVIDER", ""),
+		"The routing provider to use (istio, gateway-api, none). If empty, falls back to --use-istio.")
+	flag.StringVar(&cfg.GatewayName, "gateway-name", getEnvAsStr("GATEWAY_NAME", ""),
+		"The name of the Gateway resource for Gateway API routing.")
+	flag.StringVar(&cfg.GatewayNamespace, "gateway-namespace", getEnvAsStr("GATEWAY_NAMESPACE", ""),
+		"The namespace of the Gateway resource for Gateway API routing.")
 
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	// Fallback/Legacy resolution logic
+	if cfg.RoutingProvider == "" {
+		if cfg.UseIstio {
+			cfg.RoutingProvider = config.RoutingProviderIstio
+		} else {
+			cfg.RoutingProvider = config.RoutingProviderNone
+		}
+	}
+
+	// Validate routing provider
+	switch cfg.RoutingProvider {
+	case config.RoutingProviderIstio, config.RoutingProviderGatewayAPI, config.RoutingProviderNone:
+		// Valid
+	default:
+		setupLog.Error(fmt.Errorf("invalid routing provider: %q", cfg.RoutingProvider), "Initialization failed")
+		os.Exit(1)
+	}
+
+	// Default Gateway API configuration if selected
+	if cfg.RoutingProvider == config.RoutingProviderGatewayAPI {
+		if cfg.GatewayName == "" {
+			cfg.GatewayName = "kubeflow-gateway"
+		}
+		if cfg.GatewayNamespace == "" {
+			cfg.GatewayNamespace = "kubeflow"
+		}
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 

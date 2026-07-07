@@ -49,6 +49,7 @@ import (
 	kubefloworgv1beta1 "github.com/kubeflow/notebooks/workspaces/controller/api/v1beta1"
 	"github.com/kubeflow/notebooks/workspaces/controller/internal/config"
 	"github.com/kubeflow/notebooks/workspaces/controller/internal/helper"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
@@ -111,6 +112,7 @@ type WorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups=networking.istio.io,resources=virtualservices,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=create;delete;get;list;patch;update;watch
 
 func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) { //nolint:gocyclo
 	log := log.FromContext(ctx)
@@ -348,7 +350,9 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		service = foundService
 	}
 
-	if r.Config.UseIstio {
+	// Reconcile routing based on configuration
+	switch r.Config.RoutingProvider {
+	case config.RoutingProviderIstio:
 		// generate VirtualService
 		virtualsvc, err := r.generateVirtualService(workspace, workspaceKind, service, currentImageConfig.Spec)
 		if err != nil {
@@ -410,6 +414,69 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					return ctrl.Result{}, err
 				}
 				log.V(2).Info("VirtualService updated", "virtualService", virtualServiceName)
+			}
+		}
+
+	case config.RoutingProviderGatewayAPI:
+		// generate HTTPRoute
+		httpRoute, err := r.generateGatewayHTTPRoute(workspace, workspaceKind, service, currentImageConfig.Spec)
+		if err != nil {
+			return r.updateWorkspaceState(ctx, log, workspace,
+				kubefloworgv1beta1.WorkspaceStateError,
+				"Failed to generate Gateway API HTTPRoute: "+err.Error(),
+			)
+		}
+		if err := ctrl.SetControllerReference(workspace, httpRoute, r.Scheme); err != nil {
+			return r.updateWorkspaceState(ctx, log, workspace,
+				kubefloworgv1beta1.WorkspaceStateError,
+				"Failed to set controller reference on HTTPRoute: "+err.Error(),
+			)
+		}
+
+		// fetch HTTPRoutes
+		var httpRouteName string
+		ownedHTTPRoutes := &gatewayv1.HTTPRouteList{}
+		listOpts = &client.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(helper.IndexWorkspaceOwnerField, workspace.Name),
+			Namespace:     req.Namespace,
+		}
+		if err := r.List(ctx, ownedHTTPRoutes, listOpts); err != nil {
+			log.Error(err, "unable to list HTTPRoutes")
+			return ctrl.Result{}, err
+		}
+
+		switch numHTTPRoutes := len(ownedHTTPRoutes.Items); {
+		case numHTTPRoutes > 1:
+			httpRouteList := make([]string, len(ownedHTTPRoutes.Items))
+			for i, r := range ownedHTTPRoutes.Items {
+				httpRouteList[i] = r.Name
+			}
+			httpRouteListString := strings.Join(httpRouteList, ", ")
+			log.Error(nil, "Workspace owns multiple HTTPRoutes", "httpRoutes", httpRouteListString)
+			return r.updateWorkspaceState(ctx, log, workspace,
+				kubefloworgv1beta1.WorkspaceStateError,
+				"Workspace owns multiple HTTPRoutes: "+httpRouteListString,
+			)
+		case numHTTPRoutes == 0:
+			if err := r.Create(ctx, httpRoute); err != nil {
+				log.Error(err, "unable to create HTTPRoute")
+				return ctrl.Result{}, err
+			}
+			httpRouteName = httpRoute.ObjectMeta.Name
+			log.V(2).Info("HTTPRoute created", "httpRoute", httpRouteName)
+		default:
+			foundHTTPRoute := &ownedHTTPRoutes.Items[0]
+			httpRouteName = foundHTTPRoute.ObjectMeta.Name
+			if copyHTTPRouteFields(httpRoute, foundHTTPRoute) {
+				if err := r.Update(ctx, foundHTTPRoute); err != nil {
+					if apierrors.IsConflict(err) {
+						log.V(2).Info("update conflict while updating HTTPRoute, will requeue")
+						return ctrl.Result{Requeue: true}, nil
+					}
+					log.Error(err, "unable to update HTTPRoute")
+					return ctrl.Result{}, err
+				}
+				log.V(2).Info("HTTPRoute updated", "httpRoute", httpRouteName)
 			}
 		}
 	}
@@ -480,9 +547,11 @@ func (r *WorkspaceReconciler) SetupWithManager(mgr ctrl.Manager, opts *controlle
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{})
 
-	if r.Config.UseIstio {
-
+	switch r.Config.RoutingProvider {
+	case config.RoutingProviderIstio:
 		controllerBuilder = controllerBuilder.Owns(&istiov1.VirtualService{})
+	case config.RoutingProviderGatewayAPI:
+		controllerBuilder = controllerBuilder.Owns(&gatewayv1.HTTPRoute{})
 	}
 
 	return controllerBuilder.
@@ -1373,4 +1442,179 @@ func (r *WorkspaceReconciler) generateWorkspaceState(ctx context.Context, log lo
 
 	// STATUS: Unknown
 	return state, stateMessage, ctrl.Result{}, nil
+}
+
+// generateGatewayHTTPRoute constructs a standard Gateway API HTTPRoute resource for a Workspace
+func (r *WorkspaceReconciler) generateGatewayHTTPRoute(
+	workspace *kubefloworgv1beta1.Workspace,
+	workspaceKind *kubefloworgv1beta1.WorkspaceKind,
+	service *corev1.Service,
+	imageConfigSpec kubefloworgv1beta1.ImageConfigSpec,
+) (*gatewayv1.HTTPRoute, error) {
+
+	namePrefix := generateNamePrefix(workspace.Name, maxVirtualServiceNameLength) // Reuse name generation
+
+	currentPodTemplatePortsMap := make(map[kubefloworgv1beta1.PortId]kubefloworgv1beta1.WorkspaceKindPort)
+	for _, port := range workspaceKind.Spec.PodTemplate.Ports {
+		currentPodTemplatePortsMap[port.Id] = port
+	}
+
+	imageConfigPortsMap := make(map[kubefloworgv1beta1.PortId]kubefloworgv1beta1.ImagePort)
+	for _, port := range imageConfigSpec.Ports {
+		imageConfigPortsMap[port.Id] = port
+	}
+
+	httpPathPrefixFunc := func(portId kubefloworgv1beta1.PortId) string {
+		port, ok := imageConfigPortsMap[portId]
+		if ok {
+			return getWorkspaceConnectPath(workspace.Namespace, workspace.Name, port.Id)
+		}
+		return ""
+	}
+
+	rules := []gatewayv1.HTTPRouteRule{}
+
+	for _, imageConfigPort := range imageConfigSpec.Ports {
+		if _, exists := currentPodTemplatePortsMap[imageConfigPort.Id]; !exists {
+			continue
+		}
+		podTemplatePort := currentPodTemplatePortsMap[imageConfigPort.Id]
+
+		if podTemplatePort.Protocol != kubefloworgv1beta1.ImagePortProtocolHTTP {
+			continue
+		}
+
+		matchUriPrefix := getWorkspaceConnectPath(workspace.Namespace, workspace.Name, imageConfigPort.Id)
+
+		filters := []gatewayv1.HTTPRouteFilter{}
+
+		// URL Rewrite Filter
+		if podTemplatePort.HTTPProxy != nil && ptr.Deref(podTemplatePort.HTTPProxy.RemovePathPrefix, false) {
+			filters = append(filters, gatewayv1.HTTPRouteFilter{
+				Type: gatewayv1.HTTPRouteFilterURLRewrite,
+				URLRewrite: &gatewayv1.HTTPURLRewriteFilter{
+					Path: &gatewayv1.HTTPPathModifier{
+						Type:               gatewayv1.PrefixMatchHTTPPathModifier,
+						ReplacePrefixMatch: ptr.To("/"),
+					},
+				},
+			})
+		}
+
+		// Request Header Modifier Filter
+		if podTemplatePort.HTTPProxy != nil && podTemplatePort.HTTPProxy.RequestHeaders != nil {
+			var setHeaders []gatewayv1.HTTPHeader
+			if podTemplatePort.HTTPProxy.RequestHeaders.Set != nil {
+				setHeaders = make([]gatewayv1.HTTPHeader, 0, len(podTemplatePort.HTTPProxy.RequestHeaders.Set))
+				for k, v := range podTemplatePort.HTTPProxy.RequestHeaders.Set {
+					rendered, err := helper.RenderGoTemplate(v, httpPathPrefixFunc)
+					if err != nil {
+						return nil, fmt.Errorf("failed to render requestHeaders.set %q: %w", k, err)
+					}
+					setHeaders = append(setHeaders, gatewayv1.HTTPHeader{
+						Name:  gatewayv1.HTTPHeaderName(k),
+						Value: rendered,
+					})
+				}
+			}
+
+			var addHeaders []gatewayv1.HTTPHeader
+			if podTemplatePort.HTTPProxy.RequestHeaders.Add != nil {
+				addHeaders = make([]gatewayv1.HTTPHeader, 0, len(podTemplatePort.HTTPProxy.RequestHeaders.Add))
+				for k, v := range podTemplatePort.HTTPProxy.RequestHeaders.Add {
+					rendered, err := helper.RenderGoTemplate(v, httpPathPrefixFunc)
+					if err != nil {
+						return nil, fmt.Errorf("failed to render requestHeaders.add %q: %w", k, err)
+					}
+					addHeaders = append(addHeaders, gatewayv1.HTTPHeader{
+						Name:  gatewayv1.HTTPHeaderName(k),
+						Value: rendered,
+					})
+				}
+			}
+
+			var removeHeaders []string
+			if podTemplatePort.HTTPProxy.RequestHeaders.Remove != nil {
+				removeHeaders = podTemplatePort.HTTPProxy.RequestHeaders.Remove
+			}
+
+			if len(setHeaders) > 0 || len(addHeaders) > 0 || len(removeHeaders) > 0 {
+				filters = append(filters, gatewayv1.HTTPRouteFilter{
+					Type: gatewayv1.HTTPRouteFilterRequestHeaderModifier,
+					RequestHeaderModifier: &gatewayv1.HTTPHeaderFilter{
+						Set:    setHeaders,
+						Add:    addHeaders,
+						Remove: removeHeaders,
+					},
+				})
+			}
+		}
+
+		// Backend Reference
+		weight := int32(1)
+		backendRef := gatewayv1.HTTPBackendRef{
+			BackendRef: gatewayv1.BackendRef{
+				BackendObjectReference: gatewayv1.BackendObjectReference{
+					Group: ptr.To(gatewayv1.Group("")),
+					Kind:  ptr.To(gatewayv1.Kind("Service")),
+					Name:  gatewayv1.ObjectName(service.Name),
+					Port:  ptr.To(gatewayv1.PortNumber(imageConfigPort.Port)),
+				},
+				Weight: &weight,
+			},
+		}
+
+		rules = append(rules, gatewayv1.HTTPRouteRule{
+			Matches: []gatewayv1.HTTPRouteMatch{
+				{
+					Path: &gatewayv1.HTTPPathMatch{
+						Type:  ptr.To(gatewayv1.PathMatchPathPrefix),
+						Value: ptr.To(matchUriPrefix),
+					},
+				},
+			},
+			Filters:     filters,
+			BackendRefs: []gatewayv1.HTTPBackendRef{backendRef},
+		})
+	}
+
+	// Gateway Parent Reference
+	parentRef := gatewayv1.ParentReference{
+		Group:     ptr.To(gatewayv1.Group("gateway.networking.k8s.io")),
+		Kind:      ptr.To(gatewayv1.Kind("Gateway")),
+		Name:      gatewayv1.ObjectName(r.Config.GatewayName),
+		Namespace: ptr.To(gatewayv1.Namespace(r.Config.GatewayNamespace)),
+	}
+
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: namePrefix,
+			Namespace:    workspace.Namespace,
+			Labels: map[string]string{
+				workspaceNameLabel: workspace.Name,
+			},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{parentRef},
+			},
+			Rules: rules,
+		},
+	}
+
+	return httpRoute, nil
+}
+
+// copyHTTPRouteFields copies Spec and Labels from desired to found HTTPRoute, returns true if changed
+func copyHTTPRouteFields(desired, found *gatewayv1.HTTPRoute) bool {
+	changed := false
+	if !equality.Semantic.DeepEqual(desired.Spec, found.Spec) {
+		found.Spec = desired.Spec
+		changed = true
+	}
+	if !equality.Semantic.DeepEqual(desired.Labels, found.Labels) {
+		found.Labels = desired.Labels
+		changed = true
+	}
+	return changed
 }
