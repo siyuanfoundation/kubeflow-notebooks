@@ -33,9 +33,11 @@ clean: ## Remove local test/build artifacts.
 
 ##@ Build
 
+DEPLOYMENT_MODE ?= kubeflow
+
 .PHONY: docker-build
 docker-build:
-	docker build --tag ${IMG} .
+	docker build --build-arg DEPLOYMENT_MODE=${DEPLOYMENT_MODE} --tag ${IMG} .
 
 .PHONY: docker-push
 docker-push:

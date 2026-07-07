@@ -5,6 +5,26 @@ spec:
   components:
     cni:
       enabled: true
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
   meshConfig:
     extensionProviders:
       - name: dev-access-log
