@@ -15,6 +15,8 @@ RUN npm cache clean --force \
 COPY . .
 
 # Build the application
+ARG DEPLOYMENT_MODE=kubeflow
+ENV DEPLOYMENT_MODE=$DEPLOYMENT_MODE
 RUN npm run build:prod
 
 

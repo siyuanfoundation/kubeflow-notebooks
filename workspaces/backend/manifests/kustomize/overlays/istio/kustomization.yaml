@@ -22,6 +22,21 @@ patches:
   target:
     kind: Namespace
     name: kubeflow-workspaces
+- patch: |-
+    - op: add
+      path: /spec/template/metadata/annotations
+      value:
+        sidecar.istio.io/proxyCPU: "10m"
+        sidecar.istio.io/proxyMemory: "32Mi"
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/cpu
+      value: 10m
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 128Mi
+  target:
+    kind: Deployment
+    name: workspaces-backend
 
 replacements:
 - source:
