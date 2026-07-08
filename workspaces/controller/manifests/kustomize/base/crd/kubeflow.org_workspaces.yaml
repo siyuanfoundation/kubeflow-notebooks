@@ -295,6 +295,9 @@ spec:
                 - lastActivity
                 - lastUpdate
                 type: object
+              lastPodSnapshotName:
+                description: the name of the last successfully created GKE PodSnapshot
+                type: string
               lastRunningTime:
                 default: 0
                 description: |-

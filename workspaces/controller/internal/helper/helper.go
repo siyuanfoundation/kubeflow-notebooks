@@ -82,12 +82,14 @@ func CopyStatefulSetFields(desired *appsv1.StatefulSet, target *appsv1.StatefulS
 	}
 
 	// copy `spec.template`
-	//
-	// TODO: confirm if there is a problem with doing the update at the `spec.template` level
-	//       or if only `spec.template.spec` should be updated
-	//
-	if !equality.Semantic.DeepEqual(target.Spec.Template, desired.Spec.Template) {
+	if TemplatesDiffer(&desired.Spec.Template, &target.Spec.Template, false) {
 		target.Spec.Template = desired.Spec.Template
+		requireUpdate = true
+	}
+
+	// copy `spec.updateStrategy`
+	if !equality.Semantic.DeepEqual(target.Spec.UpdateStrategy, desired.Spec.UpdateStrategy) {
+		target.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 		requireUpdate = true
 	}
 
@@ -160,4 +162,181 @@ func CopyVirtualServiceFields(desired *istiov1.VirtualService, target *istiov1.V
 	}
 
 	return requireUpdate
+}
+
+// TemplatesDiffer compares two PodTemplateSpecs, returning true if they differ in fields we manage.
+// If ignoreRestoreAnnotation is true, the GKE pod snapshot restore annotation is ignored in the comparison.
+func TemplatesDiffer(desired, target *corev1.PodTemplateSpec, ignoreRestoreAnnotation bool) bool {
+	// 1. Compare Annotations
+	desiredAnn := desired.Annotations
+	targetAnn := target.Annotations
+	if ignoreRestoreAnnotation {
+		desiredAnn = cloneAndRemove(desiredAnn, "podsnapshot.gke.io/ps-name")
+		targetAnn = cloneAndRemove(targetAnn, "podsnapshot.gke.io/ps-name")
+	}
+	if !equality.Semantic.DeepEqual(desiredAnn, targetAnn) {
+		return true
+	}
+
+	// 2. Compare Labels
+	if !equality.Semantic.DeepEqual(desired.Labels, target.Labels) {
+		return true
+	}
+
+	// 3. Compare RuntimeClassName
+	if !equality.Semantic.DeepEqual(desired.Spec.RuntimeClassName, target.Spec.RuntimeClassName) {
+		return true
+	}
+
+	// 4. Compare ServiceAccountName
+	if desired.Spec.ServiceAccountName != target.Spec.ServiceAccountName {
+		return true
+	}
+
+	// 5. Compare Volumes
+	if volumesDiffer(desired.Spec.Volumes, target.Spec.Volumes) {
+		return true
+	}
+
+	// 6. Compare Containers
+	if len(desired.Spec.Containers) != len(target.Spec.Containers) {
+		return true
+	}
+	for i := range desired.Spec.Containers {
+		d := desired.Spec.Containers[i]
+		t := target.Spec.Containers[i]
+		if d.Name != t.Name {
+			return true
+		}
+		if d.Image != t.Image {
+			return true
+		}
+		if !equality.Semantic.DeepEqual(d.Ports, t.Ports) {
+			return true
+		}
+		if !equality.Semantic.DeepEqual(d.Env, t.Env) {
+			return true
+		}
+		if !equality.Semantic.DeepEqual(d.Resources.Requests, t.Resources.Requests) ||
+			!equality.Semantic.DeepEqual(d.Resources.Limits, t.Resources.Limits) {
+			return true
+		}
+		if !equality.Semantic.DeepEqual(d.VolumeMounts, t.VolumeMounts) {
+			return true
+		}
+		// Compare security context fields we set
+		if d.SecurityContext == nil && t.SecurityContext != nil {
+			if t.SecurityContext.AllowPrivilegeEscalation != nil ||
+				t.SecurityContext.RunAsNonRoot != nil ||
+				t.SecurityContext.Capabilities != nil {
+				return true
+			}
+		} else if d.SecurityContext != nil && t.SecurityContext == nil {
+			return true
+		} else if d.SecurityContext != nil && t.SecurityContext != nil {
+			if !equality.Semantic.DeepEqual(d.SecurityContext.AllowPrivilegeEscalation, t.SecurityContext.AllowPrivilegeEscalation) ||
+				!equality.Semantic.DeepEqual(d.SecurityContext.RunAsNonRoot, t.SecurityContext.RunAsNonRoot) ||
+				!equality.Semantic.DeepEqual(d.SecurityContext.Capabilities, t.SecurityContext.Capabilities) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func cloneAndRemove(m map[string]string, key string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	res := make(map[string]string)
+	for k, v := range m {
+		if k != key {
+			res[k] = v
+		}
+	}
+	return res
+}
+
+func volumesDiffer(desired, target []corev1.Volume) bool {
+	if len(desired) != len(target) {
+		return true
+	}
+	// Create a map of target volumes by name
+	targetMap := make(map[string]corev1.Volume)
+	for _, v := range target {
+		targetMap[v.Name] = v
+	}
+
+	for _, d := range desired {
+		t, ok := targetMap[d.Name]
+		if !ok {
+			return true
+		}
+		// Compare PVC source
+		if d.PersistentVolumeClaim != nil {
+			if t.PersistentVolumeClaim == nil {
+				return true
+			}
+			if d.PersistentVolumeClaim.ClaimName != t.PersistentVolumeClaim.ClaimName {
+				return true
+			}
+			if d.PersistentVolumeClaim.ReadOnly != t.PersistentVolumeClaim.ReadOnly {
+				return true
+			}
+		} else if t.PersistentVolumeClaim != nil {
+			return true
+		}
+
+		// Compare ConfigMap source
+		if d.ConfigMap != nil {
+			if t.ConfigMap == nil {
+				return true
+			}
+			if d.ConfigMap.Name != t.ConfigMap.Name {
+				return true
+			}
+			// Only compare defaultMode if desired specifies it
+			if d.ConfigMap.DefaultMode != nil {
+				if t.ConfigMap.DefaultMode == nil || *d.ConfigMap.DefaultMode != *t.ConfigMap.DefaultMode {
+					return true
+				}
+			}
+		} else if t.ConfigMap != nil {
+			return true
+		}
+
+		// Compare Secret source
+		if d.Secret != nil {
+			if t.Secret == nil {
+				return true
+			}
+			if d.Secret.SecretName != t.Secret.SecretName {
+				return true
+			}
+			if d.Secret.DefaultMode != nil {
+				if t.Secret.DefaultMode == nil || *d.Secret.DefaultMode != *t.Secret.DefaultMode {
+					return true
+				}
+			}
+		} else if t.Secret != nil {
+			return true
+		}
+
+		// Compare EmptyDir source
+		if d.EmptyDir != nil {
+			if t.EmptyDir == nil {
+				return true
+			}
+			if d.EmptyDir.Medium != t.EmptyDir.Medium {
+				return true
+			}
+			if !equality.Semantic.DeepEqual(d.EmptyDir.SizeLimit, t.EmptyDir.SizeLimit) {
+				return true
+			}
+		} else if t.EmptyDir != nil {
+			return true
+		}
+	}
+	return false
 }

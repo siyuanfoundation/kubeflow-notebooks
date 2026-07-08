@@ -254,6 +254,10 @@ type WorkspaceKindPodTemplate struct {
 	// +kubebuilder:validation:Optional
 	Probes *WorkspaceKindProbes `json:"probes,omitempty"`
 
+	// podSnapshot configs for enabling and configuring pod snapshot pause/resume (MUTABLE)
+	// +kubebuilder:validation:Optional
+	PodSnapshot *WorkspaceKindPodSnapshotConfig `json:"podSnapshot,omitempty"`
+
 	// volume mount paths
 	VolumeMounts WorkspaceKindVolumeMounts `json:"volumeMounts"`
 
@@ -429,6 +433,18 @@ type WorkspaceKindProbes struct {
 	// the readiness probe for the main container
 	// +kubebuilder:validation:Optional
 	ReadinessProbe *v1.Probe `json:"readinessProbe,omitempty"`
+}
+
+type WorkspaceKindPodSnapshotConfig struct {
+	// if the pod snapshot feature is enabled
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// the name of the PodSnapshotStorageConfig to use
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="kubeflow-pod-snapshot-storage-config"
+	StorageConfigName string `json:"storageConfigName,omitempty"`
 }
 
 type WorkspaceKindVolumeMounts struct {

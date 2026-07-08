@@ -16,6 +16,7 @@ kubectl delete workspace --all -n default --ignore-not-found=true
 kubectl delete pvc --all -n default --ignore-not-found=true
 kubectl delete secret workspace-secret -n default --ignore-not-found=true
 kubectl delete configmap workspacekind-image-source -n default --ignore-not-found=true
+kubectl delete configmap jupyter-ipc-config -n default --ignore-not-found=true
 kubectl delete serviceaccount default-editor -n default --ignore-not-found=true
 
 echo "=== 3. Undeploying Workspaces frontend, backend, and controller ==="
@@ -30,8 +31,10 @@ make undeploy || kubectl delete -k manifests/kustomize/overlays/istio --ignore-n
 
 cd ../..
 
-echo "=== 4. Cleaning up Workspaces CRDs and Namespace ==="
+echo "=== 4. Cleaning up Workspaces CRDs, Namespaces, and Snapshots ==="
 kubectl delete workspacekind --all --ignore-not-found=true
+kubectl delete podsnapshotstorageconfig --all --ignore-not-found=true || true
+kubectl delete podsnapshots.podsnapshot.gke.io --all --ignore-not-found=true || true
 kubectl delete ns kubeflow-workspaces --ignore-not-found=true
 
 echo "=== 5. Uninstalling Istio Gateway and Mesh ==="

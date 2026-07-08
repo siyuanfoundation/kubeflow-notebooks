@@ -4125,6 +4125,19 @@ spec:
                         description: labels to be applied to the Pod resource
                         type: object
                     type: object
+                  podSnapshot:
+                    description: podSnapshot configs for enabling and configuring
+                      pod snapshot pause/resume (MUTABLE)
+                    properties:
+                      enabled:
+                        default: false
+                        description: if the pod snapshot feature is enabled
+                        type: boolean
+                      storageConfigName:
+                        default: kubeflow-pod-snapshot-storage-config
+                        description: the name of the PodSnapshotStorageConfig to use
+                        type: string
+                    type: object
                   ports:
                     description: |-
                       port definitions which can be referenced in image config values
