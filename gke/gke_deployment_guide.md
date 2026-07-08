@@ -151,6 +151,18 @@ kubectl apply -f workspaces/controller/manifests/kustomize/samples/codeserver_v1
 kubectl apply -f workspaces/controller/manifests/kustomize/samples/rstudio_v1beta1_workspacekind.yaml
 ```
 
+### GKE PodSnapshot Templates (Optional, GKE only)
+If you are deploying on GKE and want to use the stateful pause/resume functionality:
+Ensure your GKE cluster has a `gVisor` node pool configured, and apply the pod snapshot storage configuration along with the snapshot-enabled JupyterLab template:
+
+```bash
+# Apply the storage config for pod snapshots (update the GCS bucket inside if needed)
+kubectl apply -f gke/pod-snapshot-storage-config.yaml
+
+# Apply the jupyterlab-snapshot WorkspaceKind template
+kubectl apply -f gke/jupyterlab_snapshot_workspacekind.yaml
+```
+
 ---
 
 ## 7. Access the Dashboard and Launch a Notebook
@@ -205,7 +217,59 @@ kubectl port-forward svc/$(kubectl get svc -l notebooks.kubeflow.org/workspace-n
 
 ---
 
-## 9. Cleaning Up Resources
+## 9. Stateful Pause and Resume using GKE PodSnapshot
+
+If you deployed the GKE PodSnapshot templates (Section 6), you can pause and resume a workspace without losing its memory state.
+
+### Step 9.1: Deploy a Snapshot-Enabled Workspace
+1. Create a `Workspace` using the `jupyterlab-snapshot` kind. A sample is provided at `gke/jupyterlab_snapshot_workspace.yaml`:
+   ```bash
+   kubectl apply -f gke/jupyterlab_snapshot_workspace.yaml
+   ```
+2. Wait for the pod to be running and write some test state to it:
+   ```bash
+   # Get the pod name
+   kubectl get pods -l notebooks.kubeflow.org/workspace-name=jupyterlab-snapshot-workspace
+
+   # Write a file in the container
+   kubectl exec ws-jupyterlab-snapshot-workspace-<suffix>-0 -n default -c main -- bash -c 'echo "hello from snapshot" > /tmp/checkpoint_test.txt'
+   ```
+
+### Step 9.2: Pause the Workspace (Trigger Snapshot)
+Pause the workspace by updating `spec.paused` to `true`:
+```bash
+kubectl patch workspace jupyterlab-snapshot-workspace --type merge -p '{"spec": {"paused": true}}'
+```
+* The controller will create a `PodSnapshotManualTrigger` which initiates a GKE PodSnapshot.
+* Once the snapshot is ready, the controller scales down the pod replicas to `0`.
+* You can check the snapshot status:
+  ```bash
+  kubectl get podsnapshots.podsnapshot.gke.io -n default
+  ```
+
+### Step 9.3: Resume the Workspace (Restore Snapshot)
+Resume the workspace by updating `spec.paused` to `false`:
+```bash
+kubectl patch workspace jupyterlab-snapshot-workspace --type merge -p '{"spec": {"paused": false}}'
+```
+* The controller will inject the snapshot restore annotation to the StatefulSet template.
+* GKE will restore the pod and restore its memory state from the snapshot.
+* Once the pod is back to `Running` and `Ready`, the controller automatically deletes the GKE `PodSnapshot` resource to prevent stale restores.
+
+### Step 9.4: Verify Restored State
+Verify that the test file still exists and contains the expected content in the resumed pod:
+```bash
+# Get the new pod name (since the controller may have recreated it on a new StatefulSet)
+kubectl get pods -l notebooks.kubeflow.org/workspace-name=jupyterlab-snapshot-workspace
+
+# Read the file
+kubectl exec ws-jupyterlab-snapshot-workspace-<new-suffix>-0 -n default -c main -- cat /tmp/checkpoint_test.txt
+# Output should be: hello from snapshot
+```
+
+---
+
+## 10. Cleaning Up Resources
 
 To remove all the installed workloads, custom controllers, custom resource definitions (CRDs), Istio configurations, and namespaces from the GKE cluster, run the helper cleanup script located at the repository root:
 
@@ -219,4 +283,5 @@ This script will sequentially delete:
 3. The custom CRDs and the `kubeflow-workspaces` namespace.
 4. The Istio ingress gateway, Istiod control plane, and custom namespaces.
 5. Cert-Manager stack deployment.
+
 

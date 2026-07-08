@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyter-ipc-config
+  namespace: default
+data:
+  ipc_transport.py: |
+    c.KernelManager.transport = 'ipc'

@@ -9,8 +9,16 @@ rules:
   resources:
   - configmaps
   - events
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
+  - delete
   - get
   - list
   - watch
@@ -71,6 +79,20 @@ rules:
   - networking.istio.io
   resources:
   - virtualservices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - podsnapshot.gke.io
+  resources:
+  - podsnapshotmanualtriggers
+  - podsnapshotpolicies
+  - podsnapshots
   verbs:
   - create
   - delete

@@ -207,6 +207,10 @@ type WorkspaceStatus struct {
 	//  - WARNING: this field is NOT FOR MACHINE USE, subject to change without notice
 	// +kubebuilder:default=""
 	StateMessage string `json:"stateMessage"`
+
+	// the name of the last successfully created GKE PodSnapshot
+	// +kubebuilder:validation:Optional
+	LastPodSnapshotName string `json:"lastPodSnapshotName,omitempty"`
 }
 
 type WorkspaceActivity struct {

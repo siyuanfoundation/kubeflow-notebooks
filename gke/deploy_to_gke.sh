@@ -87,6 +87,9 @@ kubectl apply -k workspaces/controller/manifests/kustomize/samples/common
 kubectl apply -f workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml
 kubectl apply -f workspaces/controller/manifests/kustomize/samples/codeserver_v1beta1_workspacekind.yaml
 kubectl apply -f workspaces/controller/manifests/kustomize/samples/rstudio_v1beta1_workspacekind.yaml
+kubectl apply -f gke/pod-snapshot-storage-config.yaml
+kubectl apply -f gke/jupyter_ipc_configmap.yaml
+kubectl apply -f gke/jupyterlab_snapshot_workspacekind.yaml
 
 echo "=== 9. Retrieving Gateway Ingress IP ==="
 INGRESS_IP=""

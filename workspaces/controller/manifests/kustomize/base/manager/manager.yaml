@@ -23,7 +23,7 @@ spec:
         - "--health-probe-bind-address=:8081"
         - "--metrics-bind-address=0"
         image: workspaces-controller
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         name: manager
         securityContext:
           allowPrivilegeEscalation: false
