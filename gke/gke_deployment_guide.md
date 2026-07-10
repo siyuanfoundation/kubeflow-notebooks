@@ -215,6 +215,42 @@ kubectl port-forward svc/$(kubectl get svc -l notebooks.kubeflow.org/workspace-n
    *(e.g., `http://127.0.0.1:8888/workspace/connect/default/my-notebook/jupyterlab/`)*
 5. Press `Enter` and select the remote kernel (e.g., `Python 3 (ipykernel)`) from the list.
 
+### Step 8.3: Connecting Directly via External Ingress IP (Alternative)
+You can also connect directly using the external IP of the Istio Ingress Gateway (retrieved in Step 7.1) without setting up port-forwarding.
+
+1. Use the HTTPS URL with the external IP:
+   `https://<EXTERNAL-IP>/workspace/connect/<namespace>/<workspace-name>/jupyterlab/`
+   *(e.g., `https://35.252.83.236/workspace/connect/default/my-notebook/jupyterlab/`)*
+   
+   > [!IMPORTANT]
+   > The URL **must** end with a trailing slash `/`. Without it, the Istio VirtualService routing will fail with a `404 Not Found` error.
+
+### Troubleshooting SSL & Connection Issues (Direct Connection)
+Since the GKE ingress uses a self-signed certificate, VS Code will likely fail to connect initially with certificate validation errors (e.g., `"unable to verify the first certificate was not issued by a trusted certificate authority"`).
+
+To resolve this:
+
+1.  **Configure VS Code Settings:**
+    Add the following settings to your VS Code `settings.json` (Workspace or User settings):
+    ```json
+    "jupyter.allowUnauthorizedRemoteConnection": true,
+    "http.proxyStrictSSL": false
+    ```
+    *After applying these settings, reload your VS Code window (`Developer: Reload Window` from Command Palette).*
+
+2.  **Global Workaround (If settings fail):**
+    If the above settings do not resolve the issue (due to extension-level certificate handling), you can force Node.js to ignore certificate validation by launching VS Code with the `NODE_TLS_REJECT_UNAUTHORIZED` environment variable:
+    
+    *   Close all VS Code instances.
+    *   Open your terminal and run:
+        ```bash
+        export NODE_TLS_REJECT_UNAUTHORIZED=0
+        ```
+    *   Launch VS Code from that **same terminal** (e.g., run `code` or `code .`). For Jetski, launch the IDE via `/opt/jetski-ide/jetski`.
+
+    > [!WARNING]
+    > Setting `NODE_TLS_REJECT_UNAUTHORIZED=0` disables SSL verification globally for all extensions in that VS Code session. Use it with caution.
+
 ---
 
 ## 9. Stateful Pause and Resume using GKE PodSnapshot

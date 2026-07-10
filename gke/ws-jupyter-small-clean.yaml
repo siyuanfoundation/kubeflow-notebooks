@@ -1,0 +1,15 @@
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: ws-jupyter-small
+  namespace: default
+spec:
+  kind: jupyterlab-snapshot
+  paused: false
+  podTemplate:
+    options:
+      imageConfig: jupyter-scipy:v1.10.0
+      podConfig: small_cpu
+    podMetadata: {}
+    volumes:
+      home: workspace-small-pvc

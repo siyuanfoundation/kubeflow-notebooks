@@ -119,6 +119,20 @@ Because we shifted to `OnDelete`, native Kubernetes rolling updates are disabled
 *   **Solution**:
     We implemented a custom volume comparison helper function `volumesDiffer` in `workspaces/controller/internal/helper/helper.go`. Instead of using `equality.Semantic.DeepEqual` on the raw volume specs, the helper performs granular comparison of fields that are explicitly defined in the desired template (e.g. volume name, ConfigMap name), while ignoring API-server defaulted fields (such as `defaultMode` for ConfigMaps and Secrets) if they are not explicitly specified in the desired spec.
 
+### Challenge 5: Jupyter Server Hang/Spin after Restore (gVisor epoll Bug)
+*   **The Problem**: After restoring a workspace, the Jupyter Server process (specifically the Tornado web framework) would frequently enter a state of high CPU utilization (~100% of a core) and become unresponsive. This was diagnosed as an issue with gVisor's restoration of the kernel-level `epoll` state. Stale or inconsistent file descriptor states in the restored `epoll` interest list caused `epoll_wait` to return immediately in a tight loop.
+*   **Solution**:
+    We forced the Jupyter Server to use `PollSelector` instead of `EpollSelector`. Since `poll` does not maintain interest state in the kernel (it is passed from user space on each call), it is significantly more robust against checkpoint/restore state mismatches. We injected the following Python configuration into the ConfigMap that generates `jupyter_server_config.py`:
+    ```python
+    import asyncio
+    import selectors
+    class PollEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+        def _loop_factory(self):
+            return asyncio.SelectorEventLoop(selectors.PollSelector())
+    asyncio.set_event_loop_policy(PollEventLoopPolicy())
+    ```
+
+
 ---
 
 ## 5. Configuration Fields Added
@@ -137,3 +151,19 @@ Because we shifted to `OnDelete`, native Kubernetes rolling updates are disabled
         // ... standard fields
     }
     ```
+
+---
+
+## 6. Integration & Testing Notes
+
+During the implementation and verification of the stateful pause/resume POC, several integration-level challenges were identified. While these did not require changes to the core Kubernetes controller design, they are critical for anyone building automated clients or testing the system.
+
+### Note 1: Session Replay Protection (Duplicate Signatures)
+*   **The Observation**: Jupyter kernels implement replay protection by tracking message signatures. When a pod is restored, the kernel's memory state contains the history of previously processed signatures. If a client attempts to send an identical request (same code, same session ID, and same message ID—common in automated loop testing) after restore, the kernel rejects it as a duplicate, causing the request to hang indefinitely.
+*   **Resolution**:
+    Standard interactive clients (like the JupyterLab UI) natively generate unique IDs for every session and message, so they are unaffected by default. However, custom automation scripts, API clients, or test runners (including our verification script `test_multi_pause_resume.py`) often use hardcoded or sequential IDs. These must be updated to use unique UUIDs (e.g., `uuid.uuid4().hex`) for `msg_id` and `session` on every call to ensure they are not flagged as replays by the restored signature history.
+
+### Note 2: Socket Settle Grace Period
+*   **The Observation**: Initiating a checkpoint immediately after closing a client connection (like a WebSocket) can capture sockets in transitional states (e.g., `FIN_WAIT` or `CLOSE_WAIT`). Restoring sockets from these states can lead to instability or hangs.
+*   **Resolution**:
+    Automated test runners should introduce a short grace period (e.g., 5 seconds) between disconnecting from the Jupyter Server and triggering the workspace pause (`paused: true`). This allows the Jupyter Server and the OS to cleanly finalize socket closures before the execution state is frozen.
