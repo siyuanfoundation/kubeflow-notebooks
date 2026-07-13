@@ -4111,6 +4111,30 @@ spec:
                     - imageConfig
                     - podConfig
                     type: object
+                  podCheckpoint:
+                    description: podCheckpoint configs for enabling and configuring
+                      pod checkpoint pause/resume (MUTABLE)
+                    properties:
+                      enabled:
+                        default: false
+                        description: if the pod checkpoint feature is enabled
+                        type: boolean
+                      gke:
+                        description: GKE specific configuration, required if provider
+                          is GKE
+                        properties:
+                          storageConfigName:
+                            default: kubeflow-pod-snapshot-storage-config
+                            description: the name of the PodSnapshotStorageConfig
+                              to use
+                            type: string
+                        type: object
+                      provider:
+                        description: the checkpoint provider implementation to use
+                        enum:
+                        - GKE
+                        type: string
+                    type: object
                   podMetadata:
                     description: metadata for Workspace Pods (MUTABLE)
                     properties:
@@ -4124,19 +4148,6 @@ spec:
                           type: string
                         description: labels to be applied to the Pod resource
                         type: object
-                    type: object
-                  podSnapshot:
-                    description: podSnapshot configs for enabling and configuring
-                      pod snapshot pause/resume (MUTABLE)
-                    properties:
-                      enabled:
-                        default: false
-                        description: if the pod snapshot feature is enabled
-                        type: boolean
-                      storageConfigName:
-                        default: kubeflow-pod-snapshot-storage-config
-                        description: the name of the PodSnapshotStorageConfig to use
-                        type: string
                     type: object
                   ports:
                     description: |-
@@ -4691,6 +4702,10 @@ spec:
                             type: integer
                         type: object
                     type: object
+                  runtimeClassName:
+                    description: runtimeClassName is the container runtime class to
+                      use for Workspace Pods (MUTABLE)
+                    type: string
                   securityContext:
                     description: security context for Workspace Pods (MUTABLE)
                     properties:

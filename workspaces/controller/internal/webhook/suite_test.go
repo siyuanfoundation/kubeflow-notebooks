@@ -29,6 +29,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -1107,4 +1108,45 @@ func NewExampleWorkspaceWithoutDisplayName(name, namespace, workspaceKindName st
 	ws := NewExampleWorkspace(name, namespace, workspaceKindName)
 	ws.Spec.DisplayName = nil
 	return ws
+}
+
+func NewExampleWorkspaceKindWithCheckpointEnabledButNoProvider(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled: ptr.To(true),
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithCheckpointGKEButNoGKEConfig(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithCheckpointGKEButEmptyStorageConfigName(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+		GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+			StorageConfigName: ptr.To(""),
+		},
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithValidCheckpointGKE(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+		GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+			StorageConfigName: ptr.To("my-storage-config"),
+		},
+	}
+	return workspaceKind
 }

@@ -246,6 +246,10 @@ type WorkspaceKindPodTemplate struct {
 	// +kubebuilder:validation:Optional
 	ServiceAccount *WorkspaceKindServiceAccount `json:"serviceAccount,omitempty"`
 
+	// runtimeClassName is the container runtime class to use for Workspace Pods (MUTABLE)
+	// +kubebuilder:validation:Optional
+	RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+
 	// activityProbe configs to determine Workspace activity (MUTABLE)
 	// +kubebuilder:validation:Optional
 	ActivityProbe *ActivityProbe `json:"activityProbe,omitempty"`
@@ -254,9 +258,9 @@ type WorkspaceKindPodTemplate struct {
 	// +kubebuilder:validation:Optional
 	Probes *WorkspaceKindProbes `json:"probes,omitempty"`
 
-	// podSnapshot configs for enabling and configuring pod snapshot pause/resume (MUTABLE)
+	// podCheckpoint configs for enabling and configuring pod checkpoint pause/resume (MUTABLE)
 	// +kubebuilder:validation:Optional
-	PodSnapshot *WorkspaceKindPodSnapshotConfig `json:"podSnapshot,omitempty"`
+	PodCheckpoint *WorkspaceKindPodCheckpointConfig `json:"podCheckpoint,omitempty"`
 
 	// volume mount paths
 	VolumeMounts WorkspaceKindVolumeMounts `json:"volumeMounts"`
@@ -435,16 +439,33 @@ type WorkspaceKindProbes struct {
 	ReadinessProbe *v1.Probe `json:"readinessProbe,omitempty"`
 }
 
-type WorkspaceKindPodSnapshotConfig struct {
-	// if the pod snapshot feature is enabled
+// +kubebuilder:validation:Enum:=GKE
+type CheckpointProvider string
+
+const (
+	CheckpointProviderGKE CheckpointProvider = "GKE"
+)
+
+type GKECheckpointConfig struct {
+	// the name of the PodSnapshotStorageConfig to use
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="kubeflow-pod-snapshot-storage-config"
+	StorageConfigName *string `json:"storageConfigName,omitempty"`
+}
+
+type WorkspaceKindPodCheckpointConfig struct {
+	// if the pod checkpoint feature is enabled
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// the name of the PodSnapshotStorageConfig to use
+	// the checkpoint provider implementation to use
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default="kubeflow-pod-snapshot-storage-config"
-	StorageConfigName string `json:"storageConfigName,omitempty"`
+	Provider CheckpointProvider `json:"provider,omitempty"`
+
+	// GKE specific configuration, required if provider is GKE
+	// +kubebuilder:validation:Optional
+	GKE *GKECheckpointConfig `json:"gke,omitempty"`
 }
 
 type WorkspaceKindVolumeMounts struct {

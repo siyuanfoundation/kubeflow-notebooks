@@ -205,9 +205,12 @@ spec:
         my-workspace-kind-annotation: my-value
       labels:
         my-workspace-kind-label: my-value
-    podSnapshot:
+    runtimeClassName: gvisor
+    podCheckpoint:
       enabled: true
-      storageConfigName: kubeflow-pod-snapshot-storage-config
+      provider: GKE
+      gke:
+        storageConfigName: kubeflow-pod-snapshot-storage-config
     ports:
     - defaultDisplayName: JupyterLab
       httpProxy:
