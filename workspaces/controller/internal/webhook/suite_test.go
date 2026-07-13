@@ -698,3 +698,44 @@ func NewExampleWorkspace(name, namespace, workspaceKindName string) *kubefloworg
 		},
 	}
 }
+
+func NewExampleWorkspaceKindWithCheckpointEnabledButNoProvider(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled: ptr.To(true),
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithCheckpointGKEButNoGKEConfig(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithCheckpointGKEButEmptyStorageConfigName(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+		GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+			StorageConfigName: ptr.To(""),
+		},
+	}
+	return workspaceKind
+}
+
+func NewExampleWorkspaceKindWithValidCheckpointGKE(name string) *kubefloworgv1beta1.WorkspaceKind {
+	workspaceKind := NewExampleWorkspaceKind(name)
+	workspaceKind.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+		Enabled:  ptr.To(true),
+		Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+		GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+			StorageConfigName: ptr.To("my-storage-config"),
+		},
+	}
+	return workspaceKind
+}

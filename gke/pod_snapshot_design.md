@@ -40,44 +40,44 @@ sequenceDiagram
     Controller->>K8s: Create PodSnapshotManualTrigger for Pod
     GKE->>K8s: Create PodSnapshot (Check pointing...)
     GKE-->>Controller: PodSnapshot is Ready
-    Controller->>K8s: Save snapshot name to status.lastPodSnapshotName
+    Controller->>K8s: Save checkpoint name to status.lastPodCheckpointName
     Controller->>K8s: Scale StatefulSet Replicas to 0
 
     Note over User, GKE: --- RESUME FLOW ---
     User->>K8s: Set spec.paused = false
-    Controller->>K8s: Detect paused = false & lastPodSnapshotName != ""
+    Controller->>K8s: Detect paused = false & lastPodCheckpointName != ""
     Controller->>K8s: Inject 'podsnapshot.gke.io/ps-name' annotation in StatefulSet template
     Controller->>K8s: Scale StatefulSet Replicas to 1
     K8s->>GKE: Create Pod (Restoring state...)
     GKE-->>Controller: Pod is Running & Ready
     Controller->>K8s: Delete PodSnapshot & ManualTrigger (prevent stale restore)
-    Controller->>K8s: Clear status.lastPodSnapshotName
+    Controller->>K8s: Clear status.lastPodCheckpointName
     Controller->>K8s: Reconcile StatefulSet (removes restore annotation)
 ```
 
 ### 3.1. Pause Flow (Checkpointing)
 1.  **Trigger**: User sets `spec.paused: true` on the `Workspace` resource.
 2.  **Reconciler Intervention**:
-    *   Verifies that the `WorkspaceKind` has PodSnapshot enabled (`spec.podTemplate.podSnapshot.enabled: true`).
-    *   Reconciles a namespace-scoped `PodSnapshotPolicy` matching the workspace labels.
-    *   Creates a `PodSnapshotManualTrigger` targeting the active workspace pod name.
-3.  **Wait for Ready**: The reconciler polls/requeues until the GKE-generated `PodSnapshot` has condition `Ready: True`.
+    *   Verifies that the `WorkspaceKind` has PodCheckpoint enabled (`spec.podTemplate.podCheckpoint.enabled: true`).
+    *   Reconciles a namespace-scoped `PodSnapshotPolicy` matching the workspace labels (if GKE provider is used).
+    *   Creates a `PodSnapshotManualTrigger` targeting the active workspace pod name (if GKE provider is used).
+3.  **Wait for Ready**: The reconciler polls/requeues until the GKE-generated `PodSnapshot` has condition `Ready: True` (if GKE provider is used).
 4.  **Scaling Down**:
-    *   The snapshot name is saved to `workspace.Status.LastPodSnapshotName`.
+    *   The checkpoint name is saved to `workspace.Status.LastPodCheckpointName`.
     *   The desired replica count for the StatefulSet is set to `0`. The pod is terminated.
 
 ### 3.2. Resume Flow (Restoration)
 1.  **Trigger**: User sets `spec.paused: false`.
 2.  **Restore Spec Generation**:
-    *   The reconciler notices `workspace.Status.LastPodSnapshotName` is populated.
-    *   It injects the annotation `podsnapshot.gke.io/ps-name: <snapshot-name>` into the StatefulSet's pod template spec.
+    *   The reconciler notices `workspace.Status.LastPodCheckpointName` is populated.
+    *   If GKE provider is used, it injects the annotation `podsnapshot.gke.io/ps-name: <checkpoint-name>` into the StatefulSet's pod template spec.
     *   The desired replica count is restored to `1`.
-3.  **Pod Recreation**: The StatefulSet controller recreates the pod. Because of the annotation, the GKE runtime intercepts creation and streams the container state back from GCS.
+3.  **Pod Recreation**: The StatefulSet controller recreates the pod. If GKE provider is used, because of the annotation, the GKE runtime intercepts creation and streams the container state back from GCS.
 4.  **Post-Restore Cleanup**:
     *   The reconciler waits until the pod is back in `Running` and `Ready` states.
-    *   It deletes the GKE `PodSnapshot` and `PodSnapshotManualTrigger` CRs.
-    *   It clears `workspace.Status.LastPodSnapshotName = ""`.
-    *   Removing `LastPodSnapshotName` means the next reconciliation loop generates a desired StatefulSet template **without** the GKE restore annotation, preventing infinite restore loops if the pod crashes/restarts.
+    *   If GKE provider is used, it deletes the GKE `PodSnapshot` and `PodSnapshotManualTrigger` CRs.
+    *   It clears `workspace.Status.LastPodCheckpointName = ""`.
+    *   Removing `LastPodCheckpointName` means the next reconciliation loop generates a desired StatefulSet template **without** the GKE restore annotation, preventing infinite restore loops if the pod crashes/restarts.
 
 ---
 
@@ -139,15 +139,32 @@ Because we shifted to `OnDelete`, native Kubernetes rolling updates are disabled
 
 1.  **`WorkspaceKind` Spec**:
     ```go
-    type PodSnapshotConfig struct {
-        Enabled           *bool  `json:"enabled,omitempty"`
+    type WorkspaceKindPodTemplate struct {
+        // ... standard fields
+        RuntimeClassName *string `json:"runtimeClassName,omitempty"`
+        PodCheckpoint *WorkspaceKindPodCheckpointConfig `json:"podCheckpoint,omitempty"`
+    }
+
+    type CheckpointProvider string
+
+    const (
+        CheckpointProviderGKE CheckpointProvider = "GKE"
+    )
+
+    type GKECheckpointConfig struct {
         StorageConfigName string `json:"storageConfigName,omitempty"`
+    }
+
+    type WorkspaceKindPodCheckpointConfig struct {
+        Enabled  *bool              `json:"enabled,omitempty"`
+        Provider CheckpointProvider `json:"provider,omitempty"`
+        GKE      *GKECheckpointConfig `json:"gke,omitempty"`
     }
     ```
 2.  **`Workspace` Status**:
     ```go
     type WorkspaceStatus struct {
-        LastPodSnapshotName string `json:"lastPodSnapshotName,omitempty"`
+        LastPodCheckpointName string `json:"lastPodCheckpointName,omitempty"`
         // ... standard fields
     }
     ```

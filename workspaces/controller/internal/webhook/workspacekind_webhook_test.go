@@ -124,6 +124,26 @@ var _ = Describe("WorkspaceKind Webhook", func() {
 				workspaceKind: NewExampleWorkspaceKindWithInvalidRequestHeadersValue("wsk-webhook-create--request-headers-invalid"),
 				shouldSucceed: false,
 			},
+			{
+				description:   "should reject creation if checkpoint is enabled but provider is empty",
+				workspaceKind: NewExampleWorkspaceKindWithCheckpointEnabledButNoProvider("wsk-webhook-create--checkpoint-no-provider"),
+				shouldSucceed: false,
+			},
+			{
+				description:   "should reject creation if checkpoint provider is GKE but GKE config is nil",
+				workspaceKind: NewExampleWorkspaceKindWithCheckpointGKEButNoGKEConfig("wsk-webhook-create--checkpoint-gke-no-config"),
+				shouldSucceed: false,
+			},
+			{
+				description:   "should reject creation if checkpoint provider is GKE but StorageConfigName is empty",
+				workspaceKind: NewExampleWorkspaceKindWithCheckpointGKEButEmptyStorageConfigName("wsk-webhook-create--checkpoint-gke-empty-storage"),
+				shouldSucceed: false,
+			},
+			{
+				description:   "should accept creation with valid GKE checkpoint config",
+				workspaceKind: NewExampleWorkspaceKindWithValidCheckpointGKE("wsk-webhook-create--checkpoint-gke-valid"),
+				shouldSucceed: true,
+			},
 		}
 
 		for _, tc := range testCases {
@@ -619,6 +639,59 @@ var _ = Describe("WorkspaceKind Webhook", func() {
 					wsk.Spec.PodTemplate.Ports[0].HTTPProxy.RequestHeaders = &kubefloworgv1beta1.IstioHeaderOperations{
 						Set: map[string]string{
 							"X-RStudio-Root-Path": `{{ httpPathPrefix "jupyterlab" }}`,
+						},
+					}
+					return ContainSubstring("")
+				},
+			},
+			{
+				description:   "should reject updating to enable checkpoint but provider is empty",
+				shouldSucceed: false,
+				workspaceKind: NewExampleWorkspaceKind(workspaceKindName),
+				modifyKindFn: func(wsk *kubefloworgv1beta1.WorkspaceKind) gomegaTypes.GomegaMatcher {
+					wsk.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+						Enabled: ptr.To(true),
+					}
+					return ContainSubstring("provider must be specified when checkpoint is enabled")
+				},
+			},
+			{
+				description:   "should reject updating to enable GKE checkpoint but GKE config is nil",
+				shouldSucceed: false,
+				workspaceKind: NewExampleWorkspaceKind(workspaceKindName),
+				modifyKindFn: func(wsk *kubefloworgv1beta1.WorkspaceKind) gomegaTypes.GomegaMatcher {
+					wsk.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+						Enabled:  ptr.To(true),
+						Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+					}
+					return ContainSubstring("gke configuration must be specified when provider is GKE")
+				},
+			},
+			{
+				description:   "should reject updating to enable GKE checkpoint but StorageConfigName is empty",
+				shouldSucceed: false,
+				workspaceKind: NewExampleWorkspaceKind(workspaceKindName),
+				modifyKindFn: func(wsk *kubefloworgv1beta1.WorkspaceKind) gomegaTypes.GomegaMatcher {
+					wsk.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+						Enabled:  ptr.To(true),
+						Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+						GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+							StorageConfigName: ptr.To(""),
+						},
+					}
+					return ContainSubstring("storageConfigName must be specified for GKE provider")
+				},
+			},
+			{
+				description:   "should accept updating to enable GKE checkpoint with valid config",
+				shouldSucceed: true,
+				workspaceKind: NewExampleWorkspaceKind(workspaceKindName),
+				modifyKindFn: func(wsk *kubefloworgv1beta1.WorkspaceKind) gomegaTypes.GomegaMatcher {
+					wsk.Spec.PodTemplate.PodCheckpoint = &kubefloworgv1beta1.WorkspaceKindPodCheckpointConfig{
+						Enabled:  ptr.To(true),
+						Provider: kubefloworgv1beta1.CheckpointProviderGKE,
+						GKE: &kubefloworgv1beta1.GKECheckpointConfig{
+							StorageConfigName: ptr.To("my-storage-config"),
 						},
 					}
 					return ContainSubstring("")

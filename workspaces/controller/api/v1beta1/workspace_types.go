@@ -208,9 +208,9 @@ type WorkspaceStatus struct {
 	// +kubebuilder:default=""
 	StateMessage string `json:"stateMessage"`
 
-	// the name of the last successfully created GKE PodSnapshot
+	// the name of the last successfully created PodCheckpoint
 	// +kubebuilder:validation:Optional
-	LastPodSnapshotName string `json:"lastPodSnapshotName,omitempty"`
+	LastPodCheckpointName string `json:"lastPodCheckpointName,omitempty"`
 }
 
 type WorkspaceActivity struct {

@@ -30,11 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -457,10 +455,10 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// reconcile GKE Pod Snapshot if enabled
-	snapshotResult, err := r.reconcilePodSnapshot(ctx, log, workspace, workspaceKind, pod)
+	// reconcile Pod Checkpoint if enabled
+	checkpointResult, err := r.reconcilePodCheckpoint(ctx, log, workspace, workspaceKind, pod)
 	if err != nil {
-		log.Error(err, "unable to reconcile PodSnapshot")
+		log.Error(err, "unable to reconcile PodCheckpoint")
 		return ctrl.Result{}, err
 	}
 
@@ -483,7 +481,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	combinedResult := mergeResults(snapshotResult, result)
+	combinedResult := mergeResults(checkpointResult, result)
 	return combinedResult, nil
 }
 
@@ -693,12 +691,12 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	// generate replica count
 	replicas := int32(1)
 	if ptr.Deref(workspace.Spec.Paused, false) {
-		podSnapshotEnabled := false
-		if workspaceKind.Spec.PodTemplate.PodSnapshot != nil && ptr.Deref(workspaceKind.Spec.PodTemplate.PodSnapshot.Enabled, false) {
-			podSnapshotEnabled = true
+		podCheckpointEnabled := false
+		if workspaceKind.Spec.PodTemplate.PodCheckpoint != nil && ptr.Deref(workspaceKind.Spec.PodTemplate.PodCheckpoint.Enabled, false) {
+			podCheckpointEnabled = true
 		}
-		if podSnapshotEnabled {
-			if workspace.Status.LastPodSnapshotName != "" {
+		if podCheckpointEnabled {
+			if workspace.Status.LastPodCheckpointName != "" {
 				replicas = int32(0)
 			} else {
 				replicas = int32(1)
@@ -729,8 +727,16 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 		}
 	}
 
-	if workspace.Status.LastPodSnapshotName != "" {
-		podAnnotations["podsnapshot.gke.io/ps-name"] = workspace.Status.LastPodSnapshotName
+	if workspace.Status.LastPodCheckpointName != "" {
+		if workspaceKind.Spec.PodTemplate.PodCheckpoint != nil {
+			provider := workspaceKind.Spec.PodTemplate.PodCheckpoint.Provider
+			if provider == "" {
+				provider = kubefloworgv1beta1.CheckpointProviderGKE
+			}
+			if provider == kubefloworgv1beta1.CheckpointProviderGKE {
+				applyGKECheckpointRestoreConfig(workspace.Status.LastPodCheckpointName, podAnnotations)
+			}
+		}
 	}
 
 	// generate container imagePullPolicy
@@ -977,8 +983,17 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 					Tolerations:        podConfigSpec.Tolerations,
 					Volumes:            volumes,
 					RuntimeClassName: func() *string {
-						if workspaceKind.Spec.PodTemplate.PodSnapshot != nil && ptr.Deref(workspaceKind.Spec.PodTemplate.PodSnapshot.Enabled, false) {
-							return ptr.To("gvisor")
+						if workspaceKind.Spec.PodTemplate.RuntimeClassName != nil {
+							return workspaceKind.Spec.PodTemplate.RuntimeClassName
+						}
+						if workspaceKind.Spec.PodTemplate.PodCheckpoint != nil && ptr.Deref(workspaceKind.Spec.PodTemplate.PodCheckpoint.Enabled, false) {
+							provider := workspaceKind.Spec.PodTemplate.PodCheckpoint.Provider
+							if provider == "" {
+								provider = kubefloworgv1beta1.CheckpointProviderGKE
+							}
+							if provider == kubefloworgv1beta1.CheckpointProviderGKE {
+								return ptr.To(defaultGKERuntimeClass)
+							}
 						}
 						return nil
 					}(),
@@ -1438,215 +1453,23 @@ func (r *WorkspaceReconciler) generateWorkspaceState(ctx context.Context, log lo
 	return state, stateMessage, ctrl.Result{}, nil
 }
 
-var (
-	podSnapshotPolicyGVK = schema.GroupVersionKind{
-		Group:   "podsnapshot.gke.io",
-		Version: "v1",
-		Kind:    "PodSnapshotPolicy",
-	}
-	podSnapshotManualTriggerGVK = schema.GroupVersionKind{
-		Group:   "podsnapshot.gke.io",
-		Version: "v1",
-		Kind:    "PodSnapshotManualTrigger",
-	}
-	podSnapshotGVK = schema.GroupVersionKind{
-		Group:   "podsnapshot.gke.io",
-		Version: "v1",
-		Kind:    "PodSnapshot",
-	}
-)
-
-func (r *WorkspaceReconciler) reconcilePodSnapshot(ctx context.Context, log logr.Logger, workspace *kubefloworgv1beta1.Workspace, workspaceKind *kubefloworgv1beta1.WorkspaceKind, pod *corev1.Pod) (ctrl.Result, error) {
-	// 1. Check if PodSnapshot is enabled
-	if workspaceKind.Spec.PodTemplate.PodSnapshot == nil || !ptr.Deref(workspaceKind.Spec.PodTemplate.PodSnapshot.Enabled, false) {
+func (r *WorkspaceReconciler) reconcilePodCheckpoint(ctx context.Context, log logr.Logger, workspace *kubefloworgv1beta1.Workspace, workspaceKind *kubefloworgv1beta1.WorkspaceKind, pod *corev1.Pod) (ctrl.Result, error) {
+	// 1. Check if PodCheckpoint is enabled
+	if workspaceKind.Spec.PodTemplate.PodCheckpoint == nil || !ptr.Deref(workspaceKind.Spec.PodTemplate.PodCheckpoint.Enabled, false) {
 		return ctrl.Result{}, nil
 	}
 
-	storageConfigName := workspaceKind.Spec.PodTemplate.PodSnapshot.StorageConfigName
-	if storageConfigName == "" {
-		storageConfigName = "kubeflow-pod-snapshot-storage-config"
+	provider := workspaceKind.Spec.PodTemplate.PodCheckpoint.Provider
+	if provider == "" {
+		provider = kubefloworgv1beta1.CheckpointProviderGKE
 	}
 
-	// 2. Reconcile PodSnapshotPolicy
-	policyName := fmt.Sprintf("ws-%s-policy", workspace.Name)
-	policy := &unstructured.Unstructured{}
-	policy.SetGroupVersionKind(podSnapshotPolicyGVK)
-	err := r.Get(ctx, types.NamespacedName{Name: policyName, Namespace: workspace.Namespace}, policy)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Info("Creating PodSnapshotPolicy", "name", policyName)
-			policy.SetName(policyName)
-			policy.SetNamespace(workspace.Namespace)
-			if err := controllerutil.SetControllerReference(workspace, policy, r.Scheme); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to set controller reference on PodSnapshotPolicy: %w", err)
-			}
-			policy.Object["spec"] = map[string]interface{}{
-				"storageConfigName": storageConfigName,
-				"selector": map[string]interface{}{
-					"matchLabels": map[string]interface{}{
-						workspaceNameLabel: workspace.Name,
-					},
-				},
-				"triggerConfig": map[string]interface{}{
-					"type":           "manual",
-					"postCheckpoint": "stop",
-				},
-			}
-			if err := r.Create(ctx, policy); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to create PodSnapshotPolicy: %w", err)
-			}
-		} else {
-			return ctrl.Result{}, fmt.Errorf("failed to get PodSnapshotPolicy: %w", err)
-		}
+	switch provider {
+	case kubefloworgv1beta1.CheckpointProviderGKE:
+		return r.reconcileGKEPodCheckpoint(ctx, log, workspace, workspaceKind, pod)
+	default:
+		return ctrl.Result{}, fmt.Errorf("unsupported checkpoint provider: %s", provider)
 	}
-
-	// 3. Handle pause state
-	if ptr.Deref(workspace.Spec.Paused, false) {
-		if workspace.Status.LastPodSnapshotName != "" {
-			// Snapshot already taken successfully and scaled down. Nothing to do.
-			return ctrl.Result{}, nil
-		}
-
-		// We need to take a snapshot.
-		if pod == nil {
-			log.Info("Pod is nil, waiting for Pod to be running to trigger snapshot")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		if pod.Status.Phase != corev1.PodRunning {
-			log.Info("Pod is not running, waiting to trigger snapshot", "phase", pod.Status.Phase)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Trigger snapshot
-		triggerName := fmt.Sprintf("ws-%s-trigger", workspace.Name)
-		trigger := &unstructured.Unstructured{}
-		trigger.SetGroupVersionKind(podSnapshotManualTriggerGVK)
-		err := r.Get(ctx, types.NamespacedName{Name: triggerName, Namespace: workspace.Namespace}, trigger)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				log.Info("Creating PodSnapshotManualTrigger", "name", triggerName, "targetPod", pod.Name)
-				trigger.SetName(triggerName)
-				trigger.SetNamespace(workspace.Namespace)
-				if err := controllerutil.SetControllerReference(workspace, trigger, r.Scheme); err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to set controller reference on PodSnapshotManualTrigger: %w", err)
-				}
-				trigger.Object["spec"] = map[string]interface{}{
-					"targetPod": pod.Name,
-				}
-				if err := r.Create(ctx, trigger); err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to create PodSnapshotManualTrigger: %w", err)
-				}
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("failed to get PodSnapshotManualTrigger: %w", err)
-		}
-
-		// Trigger exists, check if GKE has created the snapshot and populated status.snapshotCreated.name
-		snapshotName, found, err := unstructured.NestedString(trigger.Object, "status", "snapshotCreated", "name")
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to read status.snapshotCreated.name from trigger: %w", err)
-		}
-		if !found || snapshotName == "" {
-			log.Info("Waiting for snapshotCreated field to be set on trigger status")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Fetch the PodSnapshot and check if it's Ready
-		snapshot := &unstructured.Unstructured{}
-		snapshot.SetGroupVersionKind(podSnapshotGVK)
-		err = r.Get(ctx, types.NamespacedName{Name: snapshotName, Namespace: workspace.Namespace}, snapshot)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				log.Info("PodSnapshot not found, waiting", "name", snapshotName)
-				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("failed to get PodSnapshot: %w", err)
-		}
-
-		// Check if snapshot is Ready
-		conditions, found, err := unstructured.NestedSlice(snapshot.Object, "status", "conditions")
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to read status.conditions from snapshot: %w", err)
-		}
-		if !found || len(conditions) == 0 {
-			log.Info("Waiting for conditions to be set on snapshot status")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		ready := false
-		for _, condObj := range conditions {
-			cond, ok := condObj.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			condType, _ := cond["type"].(string)
-			condStatus, _ := cond["status"].(string)
-			if condType == "Ready" && condStatus == "True" {
-				ready = true
-				break
-			}
-		}
-
-		if !ready {
-			log.Info("PodSnapshot is not Ready yet, waiting...")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		log.Info("PodSnapshot is Ready. Saving to status", "snapshotName", snapshotName)
-		workspace.Status.LastPodSnapshotName = snapshotName
-
-		return ctrl.Result{}, nil
-	}
-
-	// 4. Handle resume state (not paused)
-	if !ptr.Deref(workspace.Spec.Paused, false) && workspace.Status.LastPodSnapshotName != "" {
-		if pod == nil {
-			log.Info("Waiting for Pod to be recreated for restore")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-		if pod.Status.Phase != corev1.PodRunning {
-			log.Info("Pod is not Running yet for restore", "phase", pod.Status.Phase)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		// Check if pod is Ready
-		podReady := false
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-				podReady = true
-				break
-			}
-		}
-
-		if !podReady {
-			log.Info("Pod is running but not Ready yet for restore, waiting...")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-		}
-
-		log.Info("Restore completed. Cleaning up PodSnapshot resources to prevent stale restores.", "snapshotName", workspace.Status.LastPodSnapshotName)
-
-		snapshot := &unstructured.Unstructured{}
-		snapshot.SetGroupVersionKind(podSnapshotGVK)
-		snapshot.SetName(workspace.Status.LastPodSnapshotName)
-		snapshot.SetNamespace(workspace.Namespace)
-		if err := r.Delete(ctx, snapshot); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("failed to delete PodSnapshot resource: %w", err)
-		}
-
-		triggerName := fmt.Sprintf("ws-%s-trigger", workspace.Name)
-		trigger := &unstructured.Unstructured{}
-		trigger.SetGroupVersionKind(podSnapshotManualTriggerGVK)
-		trigger.SetName(triggerName)
-		trigger.SetNamespace(workspace.Namespace)
-		if err := r.Delete(ctx, trigger); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("failed to delete PodSnapshotManualTrigger resource: %w", err)
-		}
-
-		workspace.Status.LastPodSnapshotName = ""
-		log.Info("PodSnapshot cleanup successful.")
-	}
-
-	return ctrl.Result{}, nil
 }
 
 func mergeResults(r1, r2 ctrl.Result) ctrl.Result {

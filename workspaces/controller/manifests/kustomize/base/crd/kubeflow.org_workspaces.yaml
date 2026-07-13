@@ -227,8 +227,8 @@ spec:
                 - lastActivity
                 - lastUpdate
                 type: object
-              lastPodSnapshotName:
-                description: the name of the last successfully created GKE PodSnapshot
+              lastPodCheckpointName:
+                description: the name of the last successfully created PodCheckpoint
                 type: string
               pauseTime:
                 default: 0

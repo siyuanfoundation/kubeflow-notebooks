@@ -82,6 +82,9 @@ func (v *WorkspaceKindValidator) ValidateCreate(ctx context.Context, obj runtime
 	// validate the request headers templates
 	allErrs = append(allErrs, validateRequestHeaders(workspaceKind)...)
 
+	// validate pod checkpoint config
+	allErrs = append(allErrs, validatePodCheckpoint(workspaceKind)...)
+
 	// generate helper maps for imageConfig values
 	imageConfigIdMap := make(map[string]kubefloworgv1beta1.ImageConfigValue)
 	imageConfigRedirectMap := make(map[string]string)
@@ -169,6 +172,11 @@ func (v *WorkspaceKindValidator) ValidateUpdate(ctx context.Context, oldObj, new
 	// validate the request headers templates
 	if !equality.Semantic.DeepEqual(newWorkspaceKind.Spec.PodTemplate.Ports, oldWorkspaceKind.Spec.PodTemplate.Ports) {
 		allErrs = append(allErrs, validateRequestHeaders(newWorkspaceKind)...)
+	}
+
+	// validate pod checkpoint config
+	if !equality.Semantic.DeepEqual(newWorkspaceKind.Spec.PodTemplate.PodCheckpoint, oldWorkspaceKind.Spec.PodTemplate.PodCheckpoint) {
+		allErrs = append(allErrs, validatePodCheckpoint(newWorkspaceKind)...)
 	}
 
 	// if the ports config changed, we need to validate all image config values again
@@ -728,6 +736,33 @@ func validatePodConfigRedirects(podConfigIdMap map[string]kubefloworgv1beta1.Pod
 		if _, exists := podConfigIdMap[redirectTo]; !exists {
 			redirectToPath := field.NewPath("spec", "podTemplate", "options", "podConfig", "values").Key(id).Child("redirect", "to")
 			errs = append(errs, field.Invalid(redirectToPath, redirectTo, fmt.Sprintf("target podConfig %q does not exist", redirectTo)))
+		}
+	}
+
+	return errs
+}
+
+// validatePodCheckpoint validates the pod checkpoint configuration
+func validatePodCheckpoint(workspaceKind *kubefloworgv1beta1.WorkspaceKind) []*field.Error {
+	var errs []*field.Error
+
+	checkpoint := workspaceKind.Spec.PodTemplate.PodCheckpoint
+	if checkpoint == nil {
+		return errs
+	}
+	checkpointPath := field.NewPath("spec", "podTemplate", "podCheckpoint")
+
+	if checkpoint.Enabled != nil && *checkpoint.Enabled {
+		if checkpoint.Provider == "" {
+			errs = append(errs, field.Required(checkpointPath.Child("provider"), "provider must be specified when checkpoint is enabled"))
+		} else if checkpoint.Provider == kubefloworgv1beta1.CheckpointProviderGKE {
+			if checkpoint.GKE == nil {
+				errs = append(errs, field.Required(checkpointPath.Child("gke"), "gke configuration must be specified when provider is GKE"))
+			} else {
+				if checkpoint.GKE.StorageConfigName == nil || *checkpoint.GKE.StorageConfigName == "" {
+					errs = append(errs, field.Required(checkpointPath.Child("gke", "storageConfigName"), "storageConfigName must be specified for GKE provider"))
+				}
+			}
 		}
 	}
 
