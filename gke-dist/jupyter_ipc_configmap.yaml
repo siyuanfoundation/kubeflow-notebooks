@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyter-ipc-config
+  namespace: default
+data:
+  jupyter_server_config.py: |
+    import asyncio
+    import selectors
+    class PollEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+        def _loop_factory(self):
+            return asyncio.SelectorEventLoop(selectors.PollSelector())
+    asyncio.set_event_loop_policy(PollEventLoopPolicy())
+
+    c.KernelManager.transport = 'ipc'

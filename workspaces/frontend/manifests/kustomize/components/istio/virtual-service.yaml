@@ -11,8 +11,6 @@ spec:
   - match:
     - uri:
         prefix: /workspaces/
-    - uri:
-        exact: /workspaces
     rewrite:
       uri: /
     route:
@@ -20,3 +18,8 @@ spec:
         host: workspaces-frontend.kubeflow-workspaces.svc.cluster.local
         port:
           number: 8080
+  - match:
+    - uri:
+        exact: /workspaces
+    redirect:
+      uri: /workspaces/

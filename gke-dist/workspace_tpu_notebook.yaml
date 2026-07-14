@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tpu-notebook-home-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: tpu-notebook
+  namespace: default
+spec:
+  paused: false
+  kind: "jupyterlab"
+  podTemplate:
+    volumes:
+      home: "tpu-notebook-home-pvc"
+    options:
+      imageConfig: "jupyter-tpu-custom"
+      podConfig: "tiny_cpu"

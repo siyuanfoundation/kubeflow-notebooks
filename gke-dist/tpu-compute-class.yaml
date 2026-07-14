@@ -1,0 +1,29 @@
+# single host TPU slice
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-8-single-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 8
+      topology: 2x4
+  nodePoolAutoCreation:
+    enabled: true
+---
+# multihost (2 hosts) TPU slice
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-8-multi-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x4
+  nodePoolAutoCreation:
+    enabled: true
