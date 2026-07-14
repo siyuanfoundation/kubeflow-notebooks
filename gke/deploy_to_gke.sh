@@ -32,6 +32,11 @@ make docker-build docker-push REGISTRY="${REGISTRY}" TAG="${TAG}" IMG="${REGISTR
 
 cd ../..
 
+echo "--> Jupyter AI Notebook..."
+docker build -t "${REGISTRY}/jupyter-ai-notebook:${TAG}" -f gke/jupyter-ai.Dockerfile gke/
+docker push "${REGISTRY}/jupyter-ai-notebook:${TAG}"
+
+
 echo "=== 4. Deploying core infrastructure (Cert-Manager & Istio) ==="
 ./developing/scripts/setup-cert-manager.sh
 ./developing/scripts/setup-istio.sh
@@ -89,7 +94,7 @@ kubectl apply -f workspaces/controller/manifests/kustomize/samples/codeserver_v1
 kubectl apply -f workspaces/controller/manifests/kustomize/samples/rstudio_v1beta1_workspacekind.yaml
 kubectl apply -f gke/pod-snapshot-storage-config.yaml
 kubectl apply -f gke/jupyter_ipc_configmap.yaml
-kubectl apply -f gke/jupyterlab_snapshot_workspacekind.yaml
+sed "s|JUPYTER_AI_IMAGE_PLACEHOLDER|${REGISTRY}/jupyter-ai-notebook:${TAG}|g" gke/jupyterlab_snapshot_workspacekind.yaml | kubectl apply -f -
 
 echo "=== 9. Retrieving Gateway Ingress IP ==="
 INGRESS_IP=""
