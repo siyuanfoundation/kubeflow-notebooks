@@ -19,6 +19,13 @@ spec:
     extraEnv:
     - name: NB_PREFIX
       value: '{{ httpPathPrefix "jupyterlab" }}'
+    - name: GEMINI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: gemini-secret
+          key: GEMINI_API_KEY
+    - name: GEMINI_CLI_TRUST_WORKSPACE
+      value: "true"
     extraVolumeMounts:
     - mountPath: /dev/shm
       name: dshm
@@ -37,50 +44,6 @@ spec:
         spawner:
           default: jupyter-scipy:v1.10.0
         values:
-        - id: jupyter-scipy:v1.8.0
-          redirect:
-            message:
-              level: Info
-              text: 'This update does not introduce any breaking changes in Python
-                packages from SciPy. However, the version of JupyterLab has been updated
-                from 3.6.6 to 4.2.5.
-
-                '
-            to: jupyter-scipy:v1.9.2
-          spawner:
-            description: JupyterLab, with SciPy Packages
-            displayName: jupyter-scipy:v1.8.0
-            hidden: true
-            labels:
-            - key: python_version
-              value: 3.11.6
-          spec:
-            image: ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.8.0
-            imagePullPolicy: IfNotPresent
-            ports:
-            - id: jupyterlab
-              port: 8888
-        - id: jupyter-scipy:v1.9.2
-          redirect:
-            message:
-              level: Info
-              text: 'This update does not introduce any breaking changes in Python
-                packages from SciPy.
-
-                '
-            to: jupyter-scipy:v1.10.0
-          spawner:
-            description: JupyterLab, with SciPy Packages
-            displayName: jupyter-scipy:v1.9.2
-            labels:
-            - key: python_version
-              value: 3.11.10
-          spec:
-            image: ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.9.2
-            imagePullPolicy: IfNotPresent
-            ports:
-            - id: jupyterlab
-              port: 8888
         - id: jupyter-scipy:v1.10.0
           spawner:
             description: JupyterLab, with SciPy Packages
@@ -94,30 +57,12 @@ spec:
             ports:
             - id: jupyterlab
               port: 8888
-        - id: jupyter-pytorch-cuda-full:v1.9.2
-          redirect:
-            message:
-              level: Warning
-              text: 'This update changes the version of PyTorch from 2.3.1 to 2.5.1.
-                This only breaking change in a common python package is xgboost, which
-                updated from 1.7.6 to 2.1.4.
-
-                '
-            to: jupyter-pytorch-cuda-full:v1.10.0
+        - id: jupyter-ai-notebook:latest
           spawner:
-            description: JupyterLab, with PyTorch (CUDA), and Common Python Packages
-            displayName: jupyter-pytorch-cuda-full:v1.9.2
-            labels:
-            - key: python_version
-              value: 3.11.10
-            - key: pytorch_version
-              value: 2.3.1
-            - key: cuda_version
-              value: '12.1'
-            - key: nccl_version
-              value: 2.20.5
+            description: JupyterLab, with jupyter-ai Packages
+            displayName: jupyter-ai-notebook:latest
           spec:
-            image: ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.9.2
+            image: JUPYTER_AI_IMAGE_PLACEHOLDER
             imagePullPolicy: IfNotPresent
             ports:
             - id: jupyterlab
