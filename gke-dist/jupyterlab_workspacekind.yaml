@@ -1,0 +1,111 @@
+apiVersion: kubeflow.org/v1beta1
+kind: WorkspaceKind
+metadata:
+  name: jupyterlab
+spec:
+  spawner:
+    displayName: "JupyterLab Notebook with PodSnapshot"
+    description: "A Workspace which runs JupyterLab in a Pod with Snapshot and Restore capabilities"
+    hidden: false
+    deprecated: false
+    icon:
+      url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
+    logo:
+      url: "https://upload.wikimedia.org/wikipedia/commons/3/38/Jupyter_logo.svg"
+  podTemplate:
+    podMetadata:
+      labels:
+        my-workspace-kind-label: "my-value"
+    serviceAccount:
+      name: "default-editor"
+    runtimeClassName: gvisor
+    podCheckpoint:
+      enabled: true
+      provider: GKE
+      gke:
+        storageConfigName: kubeflow-pod-snapshot-storage-config
+    culling:
+      enabled: false
+      activityProbe:
+        jupyter:
+          lastActivity: true
+    volumeMounts:
+      home: "/home/jovyan"
+    ports:
+      - id: "jupyterlab"
+        defaultDisplayName: "JupyterLab"
+        protocol: "HTTP"
+        httpProxy:
+          removePathPrefix: false
+    extraEnv:
+      - name: "NB_PREFIX"
+        value: |-
+          {{ httpPathPrefix "jupyterlab" }}
+    extraVolumeMounts:
+      - name: "dshm"
+        mountPath: "/dev/shm"
+      - name: "jupyter-ipc-config"
+        mountPath: "/etc/jupyter/jupyter_server_config.py"
+        subPath: "jupyter_server_config.py"
+    extraVolumes:
+      - name: "dshm"
+        emptyDir:
+          medium: "Memory"
+      - name: "jupyter-ipc-config"
+        configMap:
+          name: "jupyter-ipc-config"
+    securityContext:
+      fsGroup: 100
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+    options:
+      imageConfig:
+        spawner:
+          default: "jupyter-tpu-custom"
+        values:
+          - id: "jupyter-tpu-custom"
+            spawner:
+              displayName: "Jupyter TPU Custom (with Kubeflow SDK)"
+              description: "JupyterLab with kubeflow and kubernetes python SDKs"
+            spec:
+              image: "JUPYTER_TPU_IMAGE_PLACEHOLDER"
+              imagePullPolicy: "Always"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+          - id: "jupyter-scipy:v1.10.0"
+            spawner:
+              displayName: "jupyter-scipy:v1.10.0"
+              description: "JupyterLab, with SciPy Packages"
+            spec:
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+      podConfig:
+        spawner:
+          default: "tiny_cpu"
+        values:
+          - id: "tiny_cpu"
+            spawner:
+              displayName: "Tiny CPU"
+              description: "Pod with 0.1 CPU, 128 Mb RAM"
+            spec:
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+          - id: "small_cpu"
+            spawner:
+              displayName: "Small CPU"
+              description: "Pod with 0.5 CPU, 1 GB RAM"
+            spec:
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi

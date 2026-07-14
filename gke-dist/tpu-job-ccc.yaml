@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: headless-svc-ccc
+spec:
+  clusterIP: None
+  selector:
+    job-name: tpu-job-ccc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tpu-job-ccc
+spec:
+  backoffLimit: 0
+  completions: 2  # number of hosts per TPU slice
+  parallelism: 2  # number of hosts per TPU slice
+  completionMode: Indexed
+  template:
+    spec:
+      subdomain: headless-svc-ccc
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/compute-class: tpu-v5-8-multi-host
+      tolerations:
+      - key: "google.com/tpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: tpu-job
+        image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+        ports:
+        - containerPort: 8471 # Default port using which TPU VMs communicate
+        - containerPort: 8431 # Port to export TPU runtime metrics, if supported.
+        command:
+        - bash
+        - -c
+        - |
+          python -c 'import jax; print("TPU cores:", jax.device_count())'
+          sleep 432000 # 5 days
+        resources:
+          requests:
+            cpu: 10
+            memory: 128Gi
+            google.com/tpu: 4
+          limits:
+            cpu: 10
+            memory: 128Gi
+            google.com/tpu: 4

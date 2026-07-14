@@ -8,13 +8,19 @@ type UseNamespaceSelectorWrapperReturn = Omit<
 };
 
 export const useNamespaceSelectorWrapper = (): UseNamespaceSelectorWrapperReturn => {
-  const { preferredNamespace, ...rest } = useNamespaceSelector({
+  const { namespaces, preferredNamespace, ...rest } = useNamespaceSelector({
     storageKey: 'kubeflow.notebooks.namespace.lastUsed',
     storeLastNamespace: true,
   });
 
+  const defaultNs =
+    namespaces.find((n) => n.name === 'default')?.name ?? namespaces[0]?.name ?? 'default';
+
   return {
+    namespaces,
+    preferredNamespace,
     ...rest,
-    selectedNamespace: preferredNamespace?.name ?? '',
+    selectedNamespace: preferredNamespace?.name || defaultNs,
   };
 };
+

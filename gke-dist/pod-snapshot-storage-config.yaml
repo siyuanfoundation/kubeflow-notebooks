@@ -1,0 +1,9 @@
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: kubeflow-pod-snapshot-storage-config
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: "sizhang_pod_snapshots"
+      path: "kubeflow-notebooks"
