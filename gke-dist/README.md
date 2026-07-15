@@ -87,10 +87,11 @@ export TAG="local-gke-dev"
 1. **Container Builds & Pushes**: Builds and pushes custom `workspaces-controller`, `workspaces-backend`, `workspaces-frontend`, and `jupyter-tpu-notebook` container images.
 2. **Infrastructure**: Installs Cert-Manager, Istio service mesh, Istio Ingress Gateway, and required system namespaces (`kubeflow-system`, `kubeflow-workspaces`, `jobset-system`).
 3. **Kubeflow Trainer v2**: Applies Trainer CRDs, Controller Manager, JobSet controller, ClusterTrainingRuntimes (`jax-distributed`, etc.), and RBAC definitions.
-4. **Kubeflow Workspaces v2**: Applies Workspaces CRDs, Controller, Backend, Frontend, and patches image tags.
-5. **Auth & RBAC**: Sets up standalone header injection (`kubeflow-userid: admin`) and binds default namespace ServiceAccounts to `cluster-admin` so notebook pods can create `TrainJobs`.
-6. **Snapshot & Workspace Setup**: Replaces image placeholder and applies `pod-snapshot-storage-config.yaml`, `jupyter_ipc_configmap.yaml`, `jupyterlab_workspacekind.yaml`, `workspace_tpu_notebook.yaml`, `tpu-compute-class.yaml`, and `tpu-job-ccc.yaml`.
-7. **Dashboard Reachability**: Queries `istio-ingressgateway` external IP, outputs `https://${INGRESS_IP}/workspaces/`, and verifies HTTP reachability via `curl`.
+4. **Kubeflow Spark Operator**: Creates the `kubeflow` namespace and installs the Spark Operator (controller + webhook) used by the end-to-end demo's Stage 1 data processing (`SparkApplication`s). It watches all namespaces.
+5. **Kubeflow Workspaces v2**: Applies Workspaces CRDs, Controller, Backend, Frontend, and patches image tags.
+6. **Auth & RBAC**: Sets up standalone header injection (`kubeflow-userid: admin`) and binds default namespace ServiceAccounts to `cluster-admin` so notebook pods can create `TrainJobs` and `SparkApplication`s.
+7. **Snapshot & Workspace Setup**: Replaces image placeholder and applies `pod-snapshot-storage-config.yaml`, `jupyter_ipc_configmap.yaml`, `jupyterlab_workspacekind.yaml`, `workspace_tpu_notebook.yaml`, `tpu-compute-class.yaml`, and `tpu-job-ccc.yaml`.
+8. **Dashboard Reachability**: Queries `istio-ingressgateway` external IP, outputs `https://${INGRESS_IP}/workspaces/`, and verifies HTTP reachability via `curl`.
 
 ---
 
@@ -135,11 +136,37 @@ To prevent node autoscalers from deleting idle TPU nodes or losing hardware rese
 
 ---
 
-## 8. Cleanup
+## 8. End-to-End ML Workflow Demo
+
+Once the base stack is deployed, the [`demo/`](demo/README.md) directory contains
+a complete, realistic ML workflow that showcases **Kubeflow Notebooks as the
+gateway to Kubernetes**: distributed data processing (Apache Spark via the Spark
+Operator), distributed model training (multi-host TPU `TrainJob`), and inference
+serving (CPU `Deployment`) — all orchestrated from a single Jupyter Workspace,
+with a built-in **Pause & Resume** (snapshot/restore) demonstration.
+
+```bash
+cd demo
+./scripts/run_demo.sh          # provision storage + workspace, copy files in
+# then open demo/ml_workflow_demo.ipynb in the workspace and run it
+```
+
+See [`demo/README.md`](demo/README.md) for the full walkthrough.
+
+---
+
+## 9. Cleanup
 
 To tear down all deployed components and workloads from your cluster:
 
 ```bash
 cd ..
 ./gke/cleanup_gke.sh
+```
+
+To remove just the demo resources (leaving the base stack intact):
+
+```bash
+cd demo
+./scripts/cleanup_demo.sh
 ```
