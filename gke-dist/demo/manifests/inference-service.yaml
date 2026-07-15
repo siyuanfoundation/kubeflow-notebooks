@@ -1,0 +1,111 @@
+# =============================================================================
+# Inference Service (Stage 3 of the ML Demo)
+# =============================================================================
+# Deploys the model trained in Stage 2 as a scalable CPU inference service.
+#
+# The serving code (demo/jobs/serve.py) is delivered to a stock python image via
+# a ConfigMap mount — no custom image build required. The trained model is read
+# straight off the shared ReadWriteMany volume, so the moment training writes
+# params.npz the pods' readiness probes flip to Ready and start taking traffic.
+#
+# This runs on ordinary CPU nodes: the same cluster that hosts the TPU training
+# slice also serves inference, all governed by one Kubernetes control plane.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ml-demo-serve-code
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: kubeflow-ml-demo
+data:
+  # Populated by scripts/run_demo.sh (or apply_inference.sh) from demo/jobs/serve.py.
+  serve.py: |
+    # placeholder — replaced at deploy time with the contents of demo/jobs/serve.py
+    print("serve.py not injected; run scripts/apply_inference.sh")
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fashion-mnist-inference
+  namespace: default
+  labels:
+    app: fashion-mnist-inference
+    app.kubernetes.io/part-of: kubeflow-ml-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fashion-mnist-inference
+  template:
+    metadata:
+      labels:
+        app: fashion-mnist-inference
+        app.kubernetes.io/part-of: kubeflow-ml-demo
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        gke-gcsfuse/mount-options: "implicit-dirs,dir-mode=0777,file-mode=0777"
+    spec:
+      containers:
+        - name: server
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir numpy >/dev/null 2>&1
+              exec python /app/serve.py
+          env:
+            - name: DATA_ROOT
+              value: "/data"
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+            - name: serve-code
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: ml-demo-gcs-pvc
+        - name: serve-code
+          configMap:
+            name: ml-demo-serve-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fashion-mnist-inference
+  namespace: default
+  labels:
+    app: fashion-mnist-inference
+    app.kubernetes.io/part-of: kubeflow-ml-demo
+spec:
+  selector:
+    app: fashion-mnist-inference
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

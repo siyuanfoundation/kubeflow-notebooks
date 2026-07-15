@@ -4,7 +4,8 @@ FROM ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0
 RUN pip install --no-cache-dir \
     jupyter-ai \
     langchain-google-genai \
-    kubeflow \
+    "kubeflow[spark]" \
+    pyspark \
     kubernetes
 
 # Install gemini-cli (requires root)

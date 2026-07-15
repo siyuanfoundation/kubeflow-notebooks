@@ -1,0 +1,51 @@
+# =============================================================================
+# Demo Workspace: the "gateway" Jupyter notebook
+# =============================================================================
+# A small CPU Jupyter Workspace that orchestrates the whole ML pipeline. It uses
+# the custom jupyter-tpu image (which ships the kubeflow + kubernetes SDKs) and
+# has Snapshot/Restore enabled via the `jupyterlab` WorkspaceKind, so the
+# Pause & Resume demo works out of the box.
+#
+# The demo repo files (notebook + jobs/) are copied into the pod by
+# scripts/run_demo.sh after the workspace is running.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ml-demo-notebook-home-pvc
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: kubeflow-ml-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: ml-demo-notebook
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: kubeflow-ml-demo
+spec:
+  paused: false
+  kind: "jupyterlab"
+  podTemplate:
+    podMetadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+    volumes:
+      home: "ml-demo-notebook-home-pvc"
+      # Mount GCS via GCSFuse at /data so the notebook can read stage
+      # outputs (processed data, trained model) written by the distributed jobs.
+      data:
+        - pvcName: "ml-demo-gcs-pvc"
+          mountPath: "/data"
+          readOnly: false
+    options:
+      imageConfig: "jupyter-tpu-custom"
+      podConfig: "small_cpu"
