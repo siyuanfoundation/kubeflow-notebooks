@@ -29,6 +29,13 @@ def train_fashion_mnist():
     import json
     import os
     import time
+    import subprocess
+    import sys
+    try:
+        from google.cloud import storage
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "google-cloud-storage"])
+        from google.cloud import storage
     import jax
     import jax.distributed as dist
     import jax.numpy as jnp
@@ -51,7 +58,9 @@ def train_fashion_mnist():
     process_id = jax.process_index()
     n_local = jax.local_device_count()
     n_global = jax.device_count()
-    data_root = os.environ.get("DATA_ROOT", "/data")
+    bucket_name = os.environ.get("BUCKET_NAME")
+    if not bucket_name:
+        raise ValueError("BUCKET_NAME environment variable must be set")
     epochs = int(os.environ.get("EPOCHS", "5"))
     lr = float(os.environ.get("LEARNING_RATE", "0.1"))
     global_batch = int(os.environ.get("GLOBAL_BATCH_SIZE", "1024"))
@@ -59,23 +68,32 @@ def train_fashion_mnist():
     print(f"[proc {process_id}] local TPU cores={n_local}, global cores={n_global}", flush=True)
 
     # --- 2. Load the preprocessed shards produced by Stage 1. ---
-    shard_files = sorted(glob.glob(os.path.join(data_root, "processed", "train", "shard-*.npz")))
-    if not shard_files:
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    
+    blobs = list(bucket.list_blobs(prefix="processed/train/shard-"))
+    if not blobs:
         raise FileNotFoundError(
-            f"No processed shards under {data_root}/processed/train — run Stage 1 first."
+            f"No processed shards under gs://{bucket_name}/processed/train — run Stage 1 first."
         )
     xs, ys = [], []
-    for sf in shard_files:
-        d = np.load(sf)
+    for blob in sorted(blobs, key=lambda b: b.name):
+        tmp_shard = f"/tmp/{os.path.basename(blob.name)}"
+        blob.download_to_filename(tmp_shard)
+        d = np.load(tmp_shard)
         xs.append(d["images"])
         ys.append(d["labels"])
+        os.remove(tmp_shard)
     train_x = np.concatenate(xs).astype(np.float32)
     train_y = np.concatenate(ys).astype(np.float32)
     print(f"[proc {process_id}] loaded {train_x.shape[0]} train examples", flush=True)
 
-    test_d = np.load(os.path.join(data_root, "processed", "test", "test.npz"))
+    tmp_test = "/tmp/test.npz"
+    bucket.blob("processed/test/test.npz").download_to_filename(tmp_test)
+    test_d = np.load(tmp_test)
     test_x = jnp.asarray(test_d["images"], dtype=jnp.float32)
     test_y = jnp.asarray(test_d["labels"], dtype=jnp.float32)
+    os.remove(tmp_test)
 
     # --- 3. Initialize model parameters and replicate across local cores. ---
     key = random.PRNGKey(0)
@@ -122,7 +140,6 @@ def train_fashion_mnist():
     n = train_x.shape[0]
     rng = np.random.default_rng(process_id)
 
-    os.makedirs(os.path.join(data_root, "model"), exist_ok=True)
     ckpt_every = int(os.environ.get("CHECKPOINT_EVERY", "50"))
     global_step = 0
     t0 = time.time()
@@ -137,10 +154,12 @@ def train_fashion_mnist():
             global_step += 1
             if global_step % 20 == 0 and process_id == 0:
                 print(f"  epoch {epoch} step {global_step} loss={float(loss[0]):.4f}", flush=True)
-            # Rank 0 writes periodic checkpoints to the shared volume.
+            # Rank 0 writes periodic checkpoints to GCS.
             if ckpt_every and global_step % ckpt_every == 0 and process_id == 0:
-                cpath = os.path.join(data_root, "model", f"checkpoint-{global_step}.npz")
-                np.savez(cpath, **unreplicate(dev_params))
+                tmp_ckpt = f"/tmp/checkpoint-{global_step}.npz"
+                np.savez(tmp_ckpt, **unreplicate(dev_params))
+                bucket.blob(f"model/checkpoint-{global_step}.npz").upload_from_filename(tmp_ckpt)
+                os.remove(tmp_ckpt)
 
         # --- Evaluate on the held-out test set once per epoch (rank 0). ---
         if process_id == 0:
@@ -151,10 +170,14 @@ def train_fashion_mnist():
             acc = float(jnp.mean(preds == labels))
             print(f"[proc 0] epoch {epoch} test_accuracy={acc:.4f}", flush=True)
 
-    # --- 5. Persist the final model + metrics to the shared volume (rank 0). ---
+    # --- 5. Persist the final model + metrics to GCS (rank 0). ---
     if process_id == 0:
         final = unreplicate(dev_params)
-        np.savez(os.path.join(data_root, "model", "params.npz"), **final)
+        tmp_params = "/tmp/params.npz"
+        np.savez(tmp_params, **final)
+        bucket.blob("model/params.npz").upload_from_filename(tmp_params)
+        os.remove(tmp_params)
+        
         host_params = {k: jnp.asarray(v) for k, v in final.items()}
         logits = forward(host_params, test_x)
         preds = jnp.argmax(logits, axis=-1)
@@ -168,8 +191,11 @@ def train_fashion_mnist():
             "train_examples": int(train_x.shape[0]),
             "wall_time_seconds": round(time.time() - t0, 1),
         }
-        with open(os.path.join(data_root, "model", "metrics.json"), "w") as f:
+        tmp_metrics = "/tmp/metrics.json"
+        with open(tmp_metrics, "w") as f:
             json.dump(metrics, f, indent=2)
+        bucket.blob("model/metrics.json").upload_from_filename(tmp_metrics)
+        os.remove(tmp_metrics)
         print(f"[proc 0] TRAINING COMPLETE: {json.dumps(metrics)}", flush=True)
 
 

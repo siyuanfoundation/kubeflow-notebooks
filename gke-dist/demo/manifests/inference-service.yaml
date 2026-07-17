@@ -42,9 +42,6 @@ spec:
       labels:
         app: fashion-mnist-inference
         app.kubernetes.io/part-of: kubeflow-ml-demo
-      annotations:
-        gke-gcsfuse/volumes: "true"
-        gke-gcsfuse/mount-options: "implicit-dirs,dir-mode=0777,file-mode=0777"
     spec:
       containers:
         - name: server
@@ -52,18 +49,16 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              pip install --no-cache-dir numpy >/dev/null 2>&1
+              pip install --no-cache-dir numpy google-cloud-storage >/dev/null 2>&1
               exec python /app/serve.py
           env:
-            - name: DATA_ROOT
-              value: "/data"
+            - name: BUCKET_NAME
+              value: "BUCKET_NAME_PLACEHOLDER"
             - name: PORT
               value: "8080"
           ports:
             - containerPort: 8080
           volumeMounts:
-            - name: shared-data
-              mountPath: /data
             - name: serve-code
               mountPath: /app
           readinessProbe:
@@ -86,9 +81,6 @@ spec:
               cpu: "1"
               memory: 1Gi
       volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: ml-demo-gcs-pvc
         - name: serve-code
           configMap:
             name: ml-demo-serve-code

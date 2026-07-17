@@ -40,14 +40,6 @@ import urllib.request
 
 
 def _ensure_numpy():
-    """The stock `spark` image has no numpy. Install it on demand.
-
-    Called on the driver at startup and on each executor inside the partition
-    task, so both sides of the Spark job have numpy available without needing a
-    custom container image.
-    """
-    if "/data" not in sys.path:
-        sys.path.insert(0, "/data")
     try:
         import numpy  # noqa: F401
         return
@@ -62,8 +54,24 @@ def _ensure_numpy():
          "--target", target, "numpy"]
     )
 
+def _ensure_gcs():
+    try:
+        from google.cloud import storage  # noqa: F401
+        return
+    except ImportError:
+        pass
+    target = "/tmp/pydeps"
+    os.makedirs(target, exist_ok=True)
+    if target not in sys.path:
+        sys.path.insert(0, target)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--quiet",
+         "--target", target, "google-cloud-storage"]
+    )
+
 
 _ensure_numpy()
+_ensure_gcs()
 import numpy as np
 
 FASHION_MNIST_BASE = "https://storage.googleapis.com/tensorflow/tf-keras-datasets"
@@ -103,7 +111,7 @@ def read_idx_labels(path):
     return np.frombuffer(buf, dtype=np.uint8)
 
 
-def run_etl(spark, data_root="/data", num_shards=4):
+def run_etl(spark, bucket_name, raw_dir="/tmp/raw", num_shards=4):
     from pyspark.sql import functions as F
     from pyspark.sql.types import (
         ArrayType,
@@ -112,15 +120,10 @@ def run_etl(spark, data_root="/data", num_shards=4):
         StructField,
         StructType,
     )
+    from google.cloud import storage
 
-    raw_dir = os.path.join(data_root, "raw")
-    out_train = os.path.join(data_root, "processed", "train")
-    out_test = os.path.join(data_root, "processed", "test")
-    
-    # Ensure directories exist. If this fails with PermissionError,
-    # the shared volume's permissions need to be fixed (e.g. via fsGroup).
-    os.makedirs(out_train, exist_ok=True)
-    os.makedirs(out_test, exist_ok=True)
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
 
     print(f"[driver] Spark {spark.version}, target shards={num_shards}", flush=True)
 
@@ -175,9 +178,10 @@ def run_etl(spark, data_root="/data", num_shards=4):
     # --- Write one .npz shard per Spark partition to the shared volume. ---
     def write_partition(index, part_iter):
         _ensure_numpy()
+        _ensure_gcs()
         import numpy as np
-        import shutil
         import time
+        from google.cloud import storage
         feats, targs = [], []
         for r in part_iter:
             feats.append(r["features"])
@@ -187,9 +191,13 @@ def run_etl(spark, data_root="/data", num_shards=4):
         images = np.asarray(feats, dtype=np.float32)
         labels = np.asarray(targs, dtype=np.float32)
         tmp_path = f"/tmp/shard-{index:03d}-{int(time.time()*1000)}.npz"
-        shard_path = os.path.join(out_train, f"shard-{index:03d}.npz")
         np.savez_compressed(tmp_path, images=images, labels=labels)
-        shutil.copyfile(tmp_path, shard_path)
+        
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(f"processed/train/shard-{index:03d}.npz")
+        blob.upload_from_filename(tmp_path)
+        
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         return iter([(index, images.shape[0])])
@@ -205,24 +213,41 @@ def run_etl(spark, data_root="/data", num_shards=4):
         if "rdd is not implemented" in str(e) or "NOT_IMPLEMENTED" in str(e):
             def write_pandas_partition(pdf_iter):
                 _ensure_numpy()
+                _ensure_gcs()
                 import numpy as np
                 import pandas as pd
-                import shutil
                 import time
-                counts_list = []
-                for i, pdf in enumerate(pdf_iter):
+                from google.cloud import storage
+                from pyspark import TaskContext
+                
+                ctx = TaskContext.get()
+                part_id = ctx.partitionId() if ctx else int(time.time()*1000)
+                
+                feats_list, targs_list = [], []
+                for pdf in pdf_iter:
                     if pdf.empty:
                         continue
-                    feats = np.stack(pdf["features"].values).astype(np.float32)
-                    targs = np.stack(pdf["target"].values).astype(np.float32)
-                    tmp_path = f"/tmp/shard-{i:03d}-{int(time.time()*1000)}.npz"
-                    shard_path = os.path.join(out_train, f"shard-{i:03d}.npz")
-                    np.savez_compressed(tmp_path, images=feats, labels=targs)
-                    shutil.copyfile(tmp_path, shard_path)
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                    counts_list.append(len(pdf))
-                yield pd.DataFrame({"count": counts_list})
+                    feats_list.append(np.stack(pdf["features"].values).astype(np.float32))
+                    targs_list.append(np.stack(pdf["target"].values).astype(np.float32))
+                
+                if not feats_list:
+                    yield pd.DataFrame({"count": [0]})
+                    return
+                
+                feats = np.concatenate(feats_list)
+                targs = np.concatenate(targs_list)
+                
+                tmp_path = f"/tmp/shard-{part_id:03d}-{int(time.time()*1000)}.npz"
+                np.savez_compressed(tmp_path, images=feats, labels=targs)
+                
+                client = storage.Client()
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(f"processed/train/shard-{part_id:03d}.npz")
+                blob.upload_from_filename(tmp_path)
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                
+                yield pd.DataFrame({"count": [len(feats)]})
 
             write_pandas_partition.__module__ = "__main__"
             res = processed.mapInPandas(write_pandas_partition, "count int").collect()
@@ -243,24 +268,32 @@ def run_etl(spark, data_root="/data", num_shards=4):
     test_y[np.arange(test_labels.shape[0]), test_labels] = 1.0
     tmp_test = "/tmp/test.npz"
     np.savez_compressed(tmp_test, images=test_x, labels=test_y)
-    shutil.copyfile(tmp_test, os.path.join(out_test, "test.npz"))
+    blob = bucket.blob("processed/test/test.npz")
+    blob.upload_from_filename(tmp_test)
     if os.path.exists(tmp_test):
         os.remove(tmp_test)
     print(f"[driver] wrote {test_x.shape[0]} test examples", flush=True)
 
-    with open(os.path.join(data_root, "processed", "_SUCCESS"), "w") as f:
+    tmp_success = "/tmp/_SUCCESS"
+    with open(tmp_success, "w") as f:
         f.write(f"num_shards={len(counts)}\ntrain_examples={total}\n")
+    blob = bucket.blob("processed/_SUCCESS")
+    blob.upload_from_filename(tmp_success)
+    if os.path.exists(tmp_success):
+        os.remove(tmp_success)
     print("[driver] data processing complete: wrote _SUCCESS marker", flush=True)
 
 
 def main():
     from pyspark.sql import SparkSession
-    data_root = os.environ.get("DATA_ROOT", "/data")
+    bucket_name = os.environ.get("DEMO_BUCKET")
+    if not bucket_name:
+        raise ValueError("DEMO_BUCKET environment variable must be set")
     num_shards = int(os.environ.get("NUM_SHARDS", "4"))
     
     spark = SparkSession.builder.appName("fashion-mnist-etl").getOrCreate()
     try:
-        run_etl(spark, data_root=data_root, num_shards=num_shards)
+        run_etl(spark, bucket_name=bucket_name, num_shards=num_shards)
     finally:
         spark.stop()
 

@@ -24,11 +24,9 @@ kubectl delete trainjobs.trainer.kubeflow.org --all -n "${NAMESPACE}" --ignore-n
 echo "=== Deleting the demo workspace ==="
 kubectl delete workspace ml-demo-notebook -n "${NAMESPACE}" --ignore-not-found
 
-echo "=== Deleting demo volumes ==="
+echo "=== Deleting demo workspace home volume ==="
 kubectl delete pvc ml-demo-notebook-home-pvc -n "${NAMESPACE}" --ignore-not-found
-kubectl delete pvc ml-demo-gcs-pvc -n "${NAMESPACE}" --ignore-not-found
-kubectl delete pv ml-demo-gcs-pv --ignore-not-found
-# The shared storage is now in GCS.
+# The shared storage is in GCS.
 CURRENT_CONTEXT="$(kubectl config current-context)"
 IFS='_' read -ra ADDR <<< "${CURRENT_CONTEXT}"
 if [[ "${ADDR[0]}" == "gke" ]]; then

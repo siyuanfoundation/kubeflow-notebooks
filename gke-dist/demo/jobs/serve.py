@@ -2,7 +2,7 @@
 """Inference / Serving Stage (Stage 3 of the ML Demo).
 
 A tiny, dependency-light HTTP inference server that loads the model trained in
-Stage 2 from the shared ReadWriteMany volume and serves predictions. Running on
+Stage 2 from GCS and serves predictions. Running on
 regular CPU nodes (no TPU needed for this small MLP), it demonstrates the third
 leg of the ML lifecycle — serving — inside the same Kubeflow / Kubernetes world.
 
@@ -11,9 +11,6 @@ Endpoints:
   GET  /metrics   -> the metrics.json emitted by training
   POST /predict   -> body: {"instances": [[784 floats], ...]}
                      resp: {"predictions": [int, ...], "probabilities": [[...], ...]}
-
-The model file is polled at startup so the server can be deployed *before*
-training finishes and will begin serving as soon as params.npz appears.
 """
 
 import json
@@ -22,10 +19,20 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
+import subprocess
+import sys
 
-DATA_ROOT = os.environ.get("DATA_ROOT", "/data")
-MODEL_PATH = os.path.join(DATA_ROOT, "model", "params.npz")
-METRICS_PATH = os.path.join(DATA_ROOT, "model", "metrics.json")
+# Ensure google-cloud-storage is installed
+try:
+    from google.cloud import storage
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "google-cloud-storage"])
+    from google.cloud import storage
+
+BUCKET_NAME = os.environ.get("BUCKET_NAME")
+if not BUCKET_NAME:
+    raise ValueError("BUCKET_NAME environment variable must be set")
+
 PORT = int(os.environ.get("PORT", "8080"))
 
 CLASS_NAMES = [
@@ -38,17 +45,26 @@ _loaded_mtime = None
 
 
 def load_model_if_ready():
-    """Load (or hot-reload) params.npz if it exists and has changed."""
+    """Load (or hot-reload) params.npz from GCS if it exists and has changed."""
     global _params, _loaded_mtime
-    if not os.path.exists(MODEL_PATH):
+    client = storage.Client()
+    bucket = client.bucket(BUCKET_NAME)
+    blob = bucket.get_blob("model/params.npz")
+    if not blob:
         return False
-    mtime = os.path.getmtime(MODEL_PATH)
-    if _params is not None and mtime == _loaded_mtime:
+    
+    updated = blob.updated
+    if _params is not None and updated == _loaded_mtime:
         return True
-    d = np.load(MODEL_PATH)
+    
+    tmp_path = "/tmp/params.npz"
+    blob.download_to_filename(tmp_path)
+    d = np.load(tmp_path)
     _params = {k: d[k].astype(np.float32) for k in d.files}
-    _loaded_mtime = mtime
-    print(f"[serve] loaded model from {MODEL_PATH} (mtime={mtime})", flush=True)
+    os.remove(tmp_path)
+    
+    _loaded_mtime = updated
+    print(f"[serve] loaded model from gs://{BUCKET_NAME}/model/params.npz (updated={updated})", flush=True)
     return True
 
 
@@ -79,9 +95,12 @@ class Handler(BaseHTTPRequestHandler):
             ready = load_model_if_ready()
             self._json(200 if ready else 503, {"model_loaded": ready})
         elif self.path == "/metrics":
-            if os.path.exists(METRICS_PATH):
-                with open(METRICS_PATH) as f:
-                    self._json(200, json.load(f))
+            client = storage.Client()
+            bucket = client.bucket(BUCKET_NAME)
+            blob = bucket.get_blob("model/metrics.json")
+            if blob:
+                metrics_str = blob.download_as_text()
+                self._json(200, json.loads(metrics_str))
             else:
                 self._json(404, {"error": "metrics not available yet"})
         else:
@@ -91,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/predict":
             self._json(404, {"error": "not found"})
             return
-        if not load_model_if_ready():
+        if _params is None:
             self._json(503, {"error": "model not loaded yet"})
             return
         try:
@@ -113,9 +132,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     print(f"[serve] starting inference server on :{PORT}", flush=True)
-    print(f"[serve] waiting for model at {MODEL_PATH} ...", flush=True)
+    print(f"[serve] waiting for model at gs://{BUCKET_NAME}/model/params.npz ...", flush=True)
     # Try an initial load, but start serving immediately — the readiness probe
-    # (/healthz) gates traffic until params.npz appears on the shared volume.
+    # (/healthz) gates traffic until params.npz appears in the bucket.
     load_model_if_ready()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()

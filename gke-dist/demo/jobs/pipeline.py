@@ -20,14 +20,16 @@ import time
 
 from kubernetes import client, config
 from kubeflow.common.types import KubernetesBackendConfig
-from kubeflow.spark import Driver, Executor, SparkClient
+from kubeflow.spark import Driver, Executor, SparkClient, Name, NodeSelector
 from kubeflow.trainer import CustomTrainer, TrainerClient
 from kubeflow.trainer.options import kubernetes as k8s_options
 
 NAMESPACE = os.environ.get("DEMO_NAMESPACE", "default")
 BUCKET_NAME = os.environ.get("DEMO_BUCKET", "sizhang-gke-dev-ml-demo-data")
-DATA_MOUNT = "/data"
 DEMO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Spark node selector — pins Spark pods to N2 nodes with ample RAM to avoid memory eviction
+SPARK_NODE_SELECTOR = {"cloud.google.com/machine-family": "n2"}
 
 # TPU slice selector — matches the multi-host ComputeClass in tpu-compute-class.yaml.
 TPU_NODE_SELECTOR = {"cloud.google.com/compute-class": "tpu-v5-8-multi-host"}
@@ -35,20 +37,6 @@ TPU_TOLERATIONS = [
     {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
     {"key": "cloud.google.com/compute-class", "operator": "Exists", "effect": "NoSchedule"},
 ]
-
-# GCS Volume definition for GCSFuse
-GCS_VOLUME = {
-    "name": "gcs-data",
-    "csi": {
-        "driver": "gcsfuse.csi.storage.gke.io",
-        "volumeAttributes": {"bucketName": BUCKET_NAME},
-    },
-}
-GCS_MOUNT = {"name": "gcs-data", "mountPath": DATA_MOUNT}
-GCS_ANNOTATION = {
-    "gke-gcsfuse/volumes": "true",
-    "gke-gcsfuse/mount-options": "dir-mode=0777,file-mode=0777",
-}
 
 # Images
 REGISTRY = os.environ.get("REGISTRY", "us-west1-docker.pkg.dev/sizhang-gke-dev/sizhang-repo")
@@ -64,7 +52,7 @@ def _client():
 
 
 def _tpu_placement_patch(replicated_job_name="node"):
-    """Return a RuntimePatch that mounts GCS via GCSFuse AND pins pods to TPU nodes."""
+    """Return a RuntimePatch that pins pods to TPU nodes."""
     return k8s_options.RuntimePatch(
         training_runtime_spec=k8s_options.TrainingRuntimeSpecPatch(
             template=k8s_options.JobSetTemplatePatch(
@@ -75,15 +63,9 @@ def _tpu_placement_patch(replicated_job_name="node"):
                             template=k8s_options.JobTemplatePatch(
                                 spec=k8s_options.JobSpecPatch(
                                     template=k8s_options.PodTemplatePatch(
-                                        metadata={"annotations": GCS_ANNOTATION},
                                         spec=k8s_options.PodSpecPatch(
                                             node_selector=TPU_NODE_SELECTOR,
                                             tolerations=TPU_TOLERATIONS,
-                                            volumes=[GCS_VOLUME],
-                                            containers=[{
-                                                "name": "node",
-                                                "volumeMounts": [GCS_MOUNT],
-                                            }],
                                         )
                                     )
                                 )
@@ -108,62 +90,7 @@ def _get_k8s_core_api():
     return client.CoreV1Api()
 
 
-def _gcs_fuse_patch(cr, backend):
-    """Custom Spark SDK option to patch GCSFuse volumes into the SparkConnect CR.
 
-    This ensures both the Spark server (driver) and executors can access GCS
-    as a local filesystem at /data.
-    """
-    from kubeflow_spark_api import models
-
-    def patch_template(template):
-        if not template:
-            template = models.IoK8sApiCoreV1PodTemplateSpec()
-        if not template.metadata:
-            template.metadata = models.IoK8sApimachineryPkgApisMetaV1ObjectMeta()
-        if not template.metadata.annotations:
-            template.metadata.annotations = {}
-        template.metadata.annotations.update(GCS_ANNOTATION)
-
-        if not template.spec:
-            template.spec = models.IoK8sApiCoreV1PodSpec(containers=[])
-        if not template.spec.volumes:
-            template.spec.volumes = []
-
-        # Add GCS volume
-        template.spec.volumes.append(
-            models.IoK8sApiCoreV1Volume(
-                name="gcs-data",
-                csi=models.IoK8sApiCoreV1CSIVolumeSource(
-                    driver="gcsfuse.csi.storage.gke.io",
-                    volume_attributes={
-                        "bucketName": BUCKET_NAME,
-                        "mountOptions": "implicit-dirs,dir-mode=0777,file-mode=0777",
-                    },
-                ),
-            )
-        )
-
-        # Add volume mount to all containers (usually just one)
-        if not template.spec.containers:
-            template.spec.containers = [models.IoK8sApiCoreV1Container(name="spark-kubernetes-driver")]
-        for c in template.spec.containers:
-            if not c.volume_mounts:
-                c.volume_mounts = []
-            c.volume_mounts.append(
-                models.IoK8sApiCoreV1VolumeMount(
-                    name="gcs-data", mount_path=DATA_MOUNT
-                )
-            )
-            if not c.env:
-                c.env = []
-            c.env.append(
-                models.IoK8sApiCoreV1EnvVar(name="PYTHONPATH", value=DATA_MOUNT)
-            )
-        return template
-
-    cr.spec.server.template = patch_template(cr.spec.server.template)
-    cr.spec.executor.template = patch_template(cr.spec.executor.template)
 
 
 def run_data_processing(num_executors=4, num_shards=4, wait=True):
@@ -174,23 +101,21 @@ def run_data_processing(num_executors=4, num_shards=4, wait=True):
     """
     from jobs.data_processing import run_etl
 
-    # Sync jobs package to shared volume so executors can import jobs
+    # Package jobs directory as zip and send to Spark executors
     import shutil
-    target_jobs = os.path.join(DATA_MOUNT, "jobs")
-    os.makedirs(target_jobs, exist_ok=True)
-    src_jobs = os.path.join(DEMO_DIR, "jobs")
-    if os.path.exists(src_jobs):
-        for item in os.listdir(src_jobs):
-            s = os.path.join(src_jobs, item)
-            d = os.path.join(target_jobs, item)
-            if os.path.isfile(s):
-                shutil.copyfile(s, d)
+    import tempfile
+    
+    tmp_dir = tempfile.gettempdir()
+    zip_path = os.path.join(tmp_dir, "jobs")
+    if os.path.exists(zip_path + ".zip"):
+        os.remove(zip_path + ".zip")
+    shutil.make_archive(zip_path, "zip", root_dir=DEMO_DIR, base_dir="jobs")
+    zip_file = zip_path + ".zip"
 
     print(f"[pipeline] connecting to Spark ({num_executors} executors) via GCS bucket {BUCKET_NAME}...")
 
     client = SparkClient(backend_config=KubernetesBackendConfig(namespace=NAMESPACE))
 
-    # We use a custom callable option to patch GCSFuse into the SparkConnect pods.
     spark = client.connect(
         num_executors=num_executors,
         driver=Driver(image=SPARK_IMAGE, resources={"cpu": "1", "memory": "2Gi"}),
@@ -198,19 +123,24 @@ def run_data_processing(num_executors=4, num_shards=4, wait=True):
             num_instances=num_executors,
             resources_per_executor={"cpu": "1", "memory": "2Gi"},
         ),
-        options=[_gcs_fuse_patch],
+        options=[
+            Name(SPARK_APP_NAME),
+            NodeSelector(SPARK_NODE_SELECTOR),
+        ],
         spark_conf={
             "spark.kubernetes.container.image": SPARK_IMAGE,
             "spark.kubernetes.driver.label.sidecar.istio.io/inject": "false",
             "spark.kubernetes.executor.label.sidecar.istio.io/inject": "false",
-            "spark.kubernetes.executor.env.PYTHONPATH": "/data",
-            "spark.kubernetes.driver.env.PYTHONPATH": "/data",
         },
     )
+    
+    spark.addArtifacts(zip_file, pyfile=True)
+    if os.path.exists(zip_file):
+        os.remove(zip_file)
 
     try:
         print(f"[pipeline] running ETL logic ({num_shards} shards)...")
-        run_etl(spark, data_root=DATA_MOUNT, num_shards=num_shards)
+        run_etl(spark, bucket_name=BUCKET_NAME, num_shards=num_shards)
         print("[pipeline] Stage 1 complete.")
     finally:
         if wait:
@@ -245,8 +175,8 @@ def print_spark_logs():
 def run_training(num_hosts=2, epochs=5, global_batch_size=1024, wait=True, timeout=1800):
     """Stage 2: launch a multi-host TPU TrainJob for data-parallel training.
 
-    Reads the preprocessed shards from /data/processed and writes the trained
-    model + metrics to /data/model.
+    Reads the preprocessed shards from GCS and writes the trained
+    model + metrics to GCS.
     """
     from jobs.train import train_fashion_mnist  # local module
 
@@ -262,7 +192,7 @@ def run_training(num_hosts=2, epochs=5, global_batch_size=1024, wait=True, timeo
             env={
                 "JAX_PLATFORMS": "tpu,cpu",
                 "ENABLE_PJRT_COMPATIBILITY": "true",
-                "DATA_ROOT": DATA_MOUNT,
+                "BUCKET_NAME": BUCKET_NAME,
                 "EPOCHS": str(epochs),
                 "GLOBAL_BATCH_SIZE": str(global_batch_size),
             },
