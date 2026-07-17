@@ -24,8 +24,8 @@ hardware:
 | **2. Distributed model training** | Data-parallel JAX training with cross-host gradient all-reduce | 2-host Cloud TPU slice (8 cores) | Kubeflow Trainer `TrainJob` (JobSet) |
 | **3. Inference / serving** | Serves the trained model over HTTP | 2 CPU replicas | `Deployment` + `Service` |
 
-The three stages exchange data through a single **ReadWriteMany** volume, so
-there's no object-storage plumbing to set up.
+The three stages exchange data through a **shared GCS bucket** (mounted via GCSFuse),
+so data and model artifacts flow between them without any object-storage plumbing.
 
 Midway through, we demonstrate **Pause & Resume** (GKE PodSnapshot): snapshot the
 notebook pod — kernel memory and all — walk away during the long TPU training
@@ -52,7 +52,7 @@ fully intact. This is a genuine pain point for ML engineers, solved.
          │ write               │ read / write           │ read
          ▼                     ▼                        ▼
    ┌─────────────────────────────────────────────────────────┐
-   │        Shared ReadWriteMany volume  (/data)              │
+   │        Shared GCS Bucket (mounted via GCSFuse)          │
    │  raw/  processed/{train,test}/  model/{params,metrics}   │
    └─────────────────────────────────────────────────────────┘
 ```
@@ -71,12 +71,11 @@ demo/
 │   ├── serve.py                  # Stage 3: HTTP inference server (stdlib only)
 │   └── pipeline.py               # helpers the notebook uses to submit jobs
 ├── manifests/
-│   ├── shared-storage.yaml       # shared ReadWriteMany PVC (the data bus)
 │   ├── demo-workspace.yaml       # the "gateway" Jupyter Workspace + home PVC
 │   ├── spark-data-processing.yaml# Stage 1 SparkApplication + code ConfigMap
 │   └── inference-service.yaml    # inference Deployment + Service + ConfigMap
 └── scripts/
-    ├── run_demo.sh               # set up storage + workspace, copy files in
+    ├── run_demo.sh               # set up GCS bucket + workspace, copy files in
     ├── apply_data_processing.sh  # run Stage 1 (Spark ETL) from the CLI
     ├── apply_inference.sh        # deploy Stage 3 from the CLI
     └── cleanup_demo.sh           # tear down all demo resources
@@ -92,18 +91,9 @@ demo/
    [`../build_and_deploy_gke.sh`](../build_and_deploy_gke.sh) installs it for you
    (into the `kubeflow` namespace); it watches all namespaces, so
    `SparkApplication`s in `default` are picked up.
-3. A GKE cluster with:
-   - a multi-host Cloud TPU ComputeClass (`tpu-v5-8-multi-host`, see
-     [`../tpu-compute-class.yaml`](../tpu-compute-class.yaml)),
-   - the **GCP Filestore CSI driver** enabled (for the `standard-rwx` storage
-     class). Enable it with:
-     ```bash
-     gcloud container clusters update CLUSTER_NAME --update-addons=GcpFilestoreCsiDriver=ENABLED
-     ```
+3. A GKE cluster with a multi-host Cloud TPU ComputeClass (`tpu-v5-8-multi-host`, see
+   [`../tpu-compute-class.yaml`](../tpu-compute-class.yaml)).
 4. `kubectl` pointed at the cluster.
-
-If your cluster's RWX storage class isn't `standard-rwx`, edit
-[`manifests/shared-storage.yaml`](manifests/shared-storage.yaml) accordingly.
 
 ---
 

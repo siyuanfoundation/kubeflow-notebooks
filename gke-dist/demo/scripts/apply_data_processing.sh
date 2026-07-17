@@ -8,8 +8,7 @@
 #
 # Prerequisites:
 #   * the Kubeflow Spark Operator is installed (community distribution),
-#   * the shared PVC (ml-demo-shared-pvc) exists (scripts/run_demo.sh or the
-#     shared-storage.yaml manifest).
+#   * the shared GCS bucket exists (scripts/run_demo.sh).
 # -----------------------------------------------------------------------------
 set -euo pipefail
 

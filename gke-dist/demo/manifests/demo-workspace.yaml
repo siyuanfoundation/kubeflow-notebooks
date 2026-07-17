@@ -35,17 +35,8 @@ spec:
   paused: false
   kind: "jupyterlab"
   podTemplate:
-    podMetadata:
-      annotations:
-        gke-gcsfuse/volumes: "true"
     volumes:
       home: "ml-demo-notebook-home-pvc"
-      # Mount GCS via GCSFuse at /data so the notebook can read stage
-      # outputs (processed data, trained model) written by the distributed jobs.
-      data:
-        - pvcName: "ml-demo-gcs-pvc"
-          mountPath: "/data"
-          readOnly: false
     options:
       imageConfig: "jupyter-tpu-custom"
       podConfig: "small_cpu"

@@ -4,7 +4,7 @@
 # =============================================================================
 # Prerequisite: the base gke-dist stack is deployed (run ../../build_and_deploy_gke.sh).
 # This script:
-#   1. Creates the shared ReadWriteMany volume.
+#   1. Ensures the shared GCS bucket exists and is clean.
 #   2. Creates the demo Jupyter Workspace (the "gateway" notebook).
 #   3. Copies the demo files (notebook + jobs/) into the running notebook pod.
 #   4. Prints the Dashboard URL so you can open the notebook and run it.
@@ -25,12 +25,13 @@ else
 fi
 DEMO_BUCKET="${DEMO_BUCKET:-${PROJECT_ID}-ml-demo-data}"
 
-echo "=== 1. Ensuring GCS bucket and PVC exist ==="
+echo "=== 1. Ensuring GCS bucket exists and is clean ==="
 if ! gcloud storage buckets describe "gs://${DEMO_BUCKET}" --project="${PROJECT_ID}" &>/dev/null; then
   echo "Creating bucket gs://${DEMO_BUCKET}..."
   gcloud storage buckets create "gs://${DEMO_BUCKET}" --project="${PROJECT_ID}" --location=us-west1 --quiet
 else
-  echo "Bucket gs://${DEMO_BUCKET} already exists."
+  echo "Bucket gs://${DEMO_BUCKET} already exists. Cleaning existing bucket contents..."
+  gcloud storage rm --recursive "gs://${DEMO_BUCKET}/**" --quiet 2>/dev/null || true
 fi
 
 GSA_EMAIL=$(gcloud iam service-accounts list --project "${PROJECT_ID}" \
@@ -51,44 +52,14 @@ if [[ -n "${PROJECT_NUM}" ]]; then
     --role="roles/storage.admin" --quiet 2>/dev/null || true
 fi
 
-# Create a static PV and PVC for GCSFuse. This avoids needing a cluster-wide
-# StorageClass and works around the Workspace CRD not supporting the 'csi' field.
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: ml-demo-gcs-pv
-spec:
-  accessModes:
-  - ReadWriteMany
-  capacity:
-    storage: 5Gi
-  storageClassName: gcs-fuse
-  mountOptions:
-    - implicit-dirs
-    - dir-mode=0777
-    - file-mode=0777
-  csi:
-    driver: gcsfuse.csi.storage.gke.io
-    volumeHandle: ${DEMO_BUCKET}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ml-demo-gcs-pvc
-  namespace: ${NAMESPACE}
-spec:
-  accessModes:
-  - ReadWriteMany
-  resources:
-    requests:
-      storage: 5Gi
-  volumeName: ml-demo-gcs-pv
-  storageClassName: gcs-fuse
-EOF
+
 
 echo "=== 2. Creating the demo Jupyter Workspace ==="
-sed "s|BUCKET_NAME_PLACEHOLDER|${DEMO_BUCKET}|g" "${DEMO_DIR}/manifests/demo-workspace.yaml" | kubectl apply -f -
+if ! kubectl get workspace ml-demo-notebook -n "${NAMESPACE}" &>/dev/null; then
+  kubectl apply -f "${DEMO_DIR}/manifests/demo-workspace.yaml"
+else
+  echo "Workspace ml-demo-notebook already exists."
+fi
 
 echo "=== 3. Waiting for the notebook pod to become ready ==="
 POD=""
@@ -112,15 +83,26 @@ fi
 
 echo "=== 4. Copying demo files into the notebook pod ==="
 kubectl exec "${POD}" -n "${NAMESPACE}" -c main -- mkdir -p /home/jovyan/demo/jobs
-kubectl cp "${DEMO_DIR}/ml_workflow_demo.ipynb" \
-  "${NAMESPACE}/${POD}:/home/jovyan/demo/ml_workflow_demo.ipynb" -c main
-# jobs/ must be a package so `from jobs import pipeline` works.
-for f in __init__.py pipeline.py data_processing.py train.py serve.py; do
-  kubectl cp "${DEMO_DIR}/jobs/${f}" \
-    "${NAMESPACE}/${POD}:/home/jovyan/demo/jobs/${f}" -c main
-done
 kubectl cp "${DEMO_DIR}/manifests" \
   "${NAMESPACE}/${POD}:/home/jovyan/demo/manifests" -c main
+
+# Copy jobs files, substituting bucket in pipeline.py
+for f in __init__.py pipeline.py data_processing.py train.py serve.py; do
+  if [ "$f" = "pipeline.py" ]; then
+    TMP_FILE=$(mktemp)
+    sed "s|sizhang-gke-dev-ml-demo-data|${DEMO_BUCKET}|g" "${DEMO_DIR}/jobs/${f}" > "${TMP_FILE}"
+    kubectl cp "${TMP_FILE}" "${NAMESPACE}/${POD}:/home/jovyan/demo/jobs/${f}" -c main
+    rm "${TMP_FILE}"
+  else
+    kubectl cp "${DEMO_DIR}/jobs/${f}" "${NAMESPACE}/${POD}:/home/jovyan/demo/jobs/${f}" -c main
+  fi
+done
+
+# Copy notebook, substituting bucket
+TMP_NOTEBOOK=$(mktemp)
+sed "s|sizhang-gke-dev-ml-demo-data|${DEMO_BUCKET}|g" "${DEMO_DIR}/ml_workflow_demo.ipynb" > "${TMP_NOTEBOOK}"
+kubectl cp "${TMP_NOTEBOOK}" "${NAMESPACE}/${POD}:/home/jovyan/demo/ml_workflow_demo.ipynb" -c main
+rm "${TMP_NOTEBOOK}"
 
 echo "=== 5. Dashboard URL ==="
 INGRESS_IP="$(kubectl get svc istio-ingressgateway -n istio-system \

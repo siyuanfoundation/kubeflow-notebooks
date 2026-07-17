@@ -6,7 +6,8 @@ RUN pip install --no-cache-dir \
     langchain-google-genai \
     "kubeflow[spark]" \
     pyspark \
-    kubernetes
+    kubernetes \
+    google-cloud-storage
 
 # Install gemini-cli (requires root)
 USER root

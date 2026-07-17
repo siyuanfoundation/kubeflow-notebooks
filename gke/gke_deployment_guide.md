@@ -46,6 +46,11 @@ make docker-build docker-push REGISTRY=${REGISTRY} TAG=${TAG} IMG=${REGISTRY}/wo
 
 # Return to root directory
 cd ../..
+
+# Build and Push Jupyter AI Notebook
+docker build -t "${REGISTRY}/jupyter-ai-notebook:${TAG}" -f gke/jupyter-ai.Dockerfile gke/
+docker push "${REGISTRY}/jupyter-ai-notebook:${TAG}"
+
 ```
 
 ---
@@ -162,8 +167,8 @@ Ensure your GKE cluster has a `gVisor` node pool configured, and apply the pod s
 # Apply the storage config for pod snapshots (update the GCS bucket inside if needed)
 kubectl apply -f gke/pod-snapshot-storage-config.yaml
 
-# Apply the jupyterlab-snapshot WorkspaceKind template
-kubectl apply -f gke/jupyterlab_snapshot_workspacekind.yaml
+# Apply the jupyterlab-snapshot WorkspaceKind template (replacing the placeholder with your built image)
+sed "s|JUPYTER_AI_IMAGE_PLACEHOLDER|${REGISTRY}/jupyter-ai-notebook:${TAG}|g" gke/jupyterlab_snapshot_workspacekind.yaml | kubectl apply -f -
 ```
 
 ---
