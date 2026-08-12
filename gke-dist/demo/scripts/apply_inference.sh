@@ -18,7 +18,8 @@ kubectl create configmap ml-demo-serve-code \
   -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
 echo "=== Applying inference Deployment + Service ==="
-kubectl apply -f "${DEMO_DIR}/manifests/inference-service.yaml"
+BUCKET_NAME="${BUCKET_NAME:-sizhang-gke-dev-ml-demo-data}"
+sed "s/BUCKET_NAME_PLACEHOLDER/${BUCKET_NAME}/g" "${DEMO_DIR}/manifests/inference-service.yaml" | kubectl apply -f -
 
 # The manifest ships a placeholder ConfigMap; re-apply the real one so the
 # rollout picks up serve.py, then restart to pull the mounted code.

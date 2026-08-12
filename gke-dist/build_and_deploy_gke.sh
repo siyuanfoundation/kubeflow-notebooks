@@ -69,7 +69,7 @@ if [[ "${ADDR[0]}" == "gke" ]]; then
   else
     echo "Enabling Filestore CSI Driver (this may take a few minutes)..."
     gcloud container clusters update "${CLUSTER_NAME}" --location "${LOCATION}" --project "${PROJECT}" \
-      --update-addons=GcpFilestoreCsiDriver=ENABLED --quiet
+      --update-addons=GcpFilestoreCsiDriver=ENABLED --quiet || echo "WARNING: Failed to enable Filestore CSI Driver. Continuing..."
   fi
 else
   echo "WARNING: Could not parse GKE cluster info from context '${CURRENT_CONTEXT}'. Skipping Filestore enablement."

@@ -118,10 +118,10 @@ def run_data_processing(num_executors=4, num_shards=4, wait=True):
 
     spark = client.connect(
         num_executors=num_executors,
-        driver=Driver(image=SPARK_IMAGE, resources={"cpu": "1", "memory": "2Gi"}),
+        driver=Driver(image=SPARK_IMAGE, resources={"cpu": "1", "memory": "4Gi"}),
         executor=Executor(
             num_instances=num_executors,
-            resources_per_executor={"cpu": "1", "memory": "2Gi"},
+            resources_per_executor={"cpu": "1", "memory": "4Gi"},
         ),
         options=[
             Name(SPARK_APP_NAME),

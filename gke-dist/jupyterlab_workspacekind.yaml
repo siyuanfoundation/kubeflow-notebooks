@@ -16,19 +16,16 @@ spec:
     podMetadata:
       labels:
         my-workspace-kind-label: "my-value"
-    serviceAccount:
-      name: "default-editor"
     runtimeClassName: gvisor
     podCheckpoint:
       enabled: true
       provider: GKE
       gke:
         storageConfigName: kubeflow-pod-snapshot-storage-config
-    culling:
-      enabled: false
-      activityProbe:
-        jupyter:
-          lastActivity: true
+    activityProbe:
+      jupyter:
+        lastActivity: true
+        portId: jupyterlab
     volumeMounts:
       home: "/home/jovyan"
     ports:
