@@ -295,11 +295,8 @@ def train_scaling_model(is_local_debug=False):
             print("\n=== Generating text from locally trained model ===")
             import transformers
             tokenizer = transformers.GPT2Tokenizer.from_pretrained("gpt2")
-            prompts = [
-                "The history of the world is",
-                "Machine learning provides",
-                "In the future, artificial intelligence will"
-            ]
+            from jobs import PROMPTS
+            prompts = PROMPTS
             
             def generate_step(params, context):
                 logits = model.apply(params, context)

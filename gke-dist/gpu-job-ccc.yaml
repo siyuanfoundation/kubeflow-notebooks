@@ -21,9 +21,12 @@ spec:
       subdomain: headless-svc-gpu-ccc
       restartPolicy: Never
       nodeSelector:
-        cloud.google.com/compute-class: gpu-l4-spot
+        cloud.google.com/compute-class: gpu-t4-spot
       tolerations:
       - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "cloud.google.com/compute-class"
         operator: "Exists"
         effect: "NoSchedule"
       containers:

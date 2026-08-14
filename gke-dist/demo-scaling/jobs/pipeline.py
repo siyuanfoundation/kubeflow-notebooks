@@ -214,7 +214,16 @@ def deploy_inference(wait=True, timeout=180):
     print("[pipeline] deploying GPU inference service...")
     import subprocess
     
-    # 1. Create or update the ConfigMap for serve.py
+    # 1. Apply the deployment manifest, replacing BUCKET_NAME_PLACEHOLDER
+    # (This manifest also contains a placeholder ConfigMap that must be applied BEFORE we inject the real code)
+    manifest_path = os.path.join(DEMO_DIR, "manifests", "inference-service.yaml")
+    with open(manifest_path, "r") as f:
+        manifest_content = f.read()
+    manifest_content = manifest_content.replace("BUCKET_NAME_PLACEHOLDER", BUCKET_NAME)
+    
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest_content, text=True, check=True)
+
+    # 2. Create or update the ConfigMap for serve.py with the REAL code
     serve_py_path = os.path.join(DEMO_DIR, "jobs", "serve.py")
     cm_yaml = subprocess.run([
         "kubectl", "create", "configmap", "ml-scaling-demo-serve-code",
@@ -224,14 +233,6 @@ def deploy_inference(wait=True, timeout=180):
     ], capture_output=True, check=True, text=True).stdout
     
     subprocess.run(["kubectl", "apply", "-f", "-"], input=cm_yaml, text=True, check=True)
-    
-    # 2. Apply the deployment manifest, replacing BUCKET_NAME_PLACEHOLDER
-    manifest_path = os.path.join(DEMO_DIR, "manifests", "inference-service.yaml")
-    with open(manifest_path, "r") as f:
-        manifest_content = f.read()
-    manifest_content = manifest_content.replace("BUCKET_NAME_PLACEHOLDER", BUCKET_NAME)
-    
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest_content, text=True, check=True)
     
     # 3. Rollout restart
     subprocess.run(["kubectl", "rollout", "restart", "deployment/scaling-model-inference", "-n", NAMESPACE], check=True)

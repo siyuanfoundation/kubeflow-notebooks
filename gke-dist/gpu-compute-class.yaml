@@ -11,3 +11,17 @@ spec:
       count: 1
   nodePoolAutoCreation:
     enabled: true
+---
+# NVIDIA T4 GPU Spot ComputeClass
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-t4-spot
+spec:
+  priorities:
+  - spot: true
+    gpu:
+      type: nvidia-tesla-t4
+      count: 1
+  nodePoolAutoCreation:
+    enabled: true

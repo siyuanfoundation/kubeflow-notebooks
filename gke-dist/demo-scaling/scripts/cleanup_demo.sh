@@ -24,11 +24,14 @@ echo "=== Tearing down the Notebook Workspace ==="
 kubectl delete workspace ml-scaling-demo-notebook -n "${NAMESPACE}" --ignore-not-found
 kubectl delete pvc ml-scaling-demo-home-pvc -n "${NAMESPACE}" --ignore-not-found
 
-echo "=== Restoring TPU Reservation Placeholder Job ==="
+echo "=== Restoring TPU and GPU Reservation Placeholder Jobs ==="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(cd "${SCRIPT_DIR}/../../" && pwd)"
 if [ -f "${PARENT_DIR}/tpu-job-ccc.yaml" ]; then
   kubectl apply -f "${PARENT_DIR}/tpu-job-ccc.yaml"
+fi
+if [ -f "${PARENT_DIR}/gpu-job-ccc.yaml" ]; then
+  kubectl apply -f "${PARENT_DIR}/gpu-job-ccc.yaml"
 fi
 
 echo "=========================================================================="
