@@ -264,4 +264,7 @@ if __name__ == "__main__":
     print("\n=== [Pipeline] RE-APPLYING TPU PLACEHOLDER ===")
     os.system("kubectl apply -f ../tpu-job-ccc.yaml")
     
+    print("\n=== [Pipeline] CLEANING UP SPARK CONNECT ===")
+    os.system(f"kubectl delete sparkconnect {SPARK_APP_NAME} -n {NAMESPACE} --ignore-not-found")
+    
     print("\n=== [Pipeline] HEADLESS PIPELINE COMPLETE ===")
