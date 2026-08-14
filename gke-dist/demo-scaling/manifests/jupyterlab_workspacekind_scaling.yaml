@@ -100,3 +100,26 @@ spec:
                 requests:
                   cpu: 500m
                   memory: 1Gi
+          - id: "tpu_single_host"
+            spawner:
+              displayName: "Single Host TPU (v5e-8)"
+              description: "Pod with 8 CPU, 32 GB RAM, and 8 TPU Cores (v5e-8 single-host) for local JAX debugging"
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: tpu-v5-8-single-host
+              tolerations:
+                - key: "google.com/tpu"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+                - key: "cloud.google.com/compute-class"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: "32Gi"
+                  google.com/tpu: "8"
+                limits:
+                  cpu: "8"
+                  memory: "32Gi"
+                  google.com/tpu: "8"

@@ -7,7 +7,10 @@ RUN pip install --no-cache-dir \
     "kubeflow[spark]" \
     pyspark \
     kubernetes \
-    google-cloud-storage
+    google-cloud-storage \
+    pyarrow && \
+    pip install --no-cache-dir torch "torch_xla[tpu]" -f https://storage.googleapis.com/libtpu-releases/index.html && \
+    pip install --no-cache-dir "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 # Install gemini-cli (requires root)
 USER root

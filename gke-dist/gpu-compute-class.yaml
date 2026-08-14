@@ -1,0 +1,13 @@
+# NVIDIA L4 GPU Spot ComputeClass
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-l4-spot
+spec:
+  priorities:
+  - spot: true
+    gpu:
+      type: nvidia-l4
+      count: 1
+  nodePoolAutoCreation:
+    enabled: true

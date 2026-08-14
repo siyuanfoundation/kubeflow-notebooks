@@ -1,0 +1,34 @@
+# =============================================================================
+# Scaling Demo Workspace: Jupyter notebook with Single Host TPU
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ml-scaling-demo-home-pvc
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: kubeflow-ml-scaling-demo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: ml-scaling-demo-notebook
+  namespace: default
+  labels:
+    app.kubernetes.io/part-of: kubeflow-ml-scaling-demo
+spec:
+  paused: false
+  kind: "jupyterlab"
+  podTemplate:
+    volumes:
+      home: "ml-scaling-demo-home-pvc"
+    options:
+      imageConfig: "jupyter-tpu-custom"
+      podConfig: "tpu_single_host"
