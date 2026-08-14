@@ -209,6 +209,40 @@ def print_logs(job_id):
             print(item)
 
 
+def deploy_inference(wait=True, timeout=180):
+    """Stage 4: deploy GPU inference service by creating ConfigMap and applying manifests."""
+    print("[pipeline] deploying GPU inference service...")
+    import subprocess
+    
+    # 1. Create or update the ConfigMap for serve.py
+    serve_py_path = os.path.join(DEMO_DIR, "jobs", "serve.py")
+    cm_yaml = subprocess.run([
+        "kubectl", "create", "configmap", "ml-scaling-demo-serve-code",
+        f"--from-file=serve.py={serve_py_path}",
+        "-n", NAMESPACE,
+        "--dry-run=client", "-o", "yaml"
+    ], capture_output=True, check=True, text=True).stdout
+    
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=cm_yaml, text=True, check=True)
+    
+    # 2. Apply the deployment manifest, replacing BUCKET_NAME_PLACEHOLDER
+    manifest_path = os.path.join(DEMO_DIR, "manifests", "inference-service.yaml")
+    with open(manifest_path, "r") as f:
+        manifest_content = f.read()
+    manifest_content = manifest_content.replace("BUCKET_NAME_PLACEHOLDER", BUCKET_NAME)
+    
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest_content, text=True, check=True)
+    
+    # 3. Rollout restart
+    subprocess.run(["kubectl", "rollout", "restart", "deployment/scaling-model-inference", "-n", NAMESPACE], check=True)
+    
+    # 4. Wait for rollout
+    if wait:
+        print("[pipeline] waiting for inference rollout...")
+        subprocess.run(["kubectl", "rollout", "status", "deployment/scaling-model-inference", "-n", NAMESPACE, f"--timeout={timeout}s"], check=True)
+    print("[pipeline] Inference service is up.")
+
+
 if __name__ == "__main__":
     # Runs the full headless pipeline sequentially
     import sys
