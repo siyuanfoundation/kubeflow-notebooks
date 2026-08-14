@@ -28,7 +28,7 @@ metadata:
     app: scaling-model-inference
     app.kubernetes.io/part-of: kubeflow-ml-scaling-demo
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: scaling-model-inference

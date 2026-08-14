@@ -4,14 +4,58 @@ metadata:
   name: jupyterlab
 spec:
   spawner:
-    displayName: "JupyterLab Notebook with PodSnapshot"
-    description: "A Workspace which runs JupyterLab in a Pod with Snapshot and Restore capabilities"
-    hidden: false
-    deprecated: false
+    displayName: "JupyterLab Notebook"
+    description: "A Workspace which runs JupyterLab"
     icon:
       url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
     logo:
       url: "https://upload.wikimedia.org/wikipedia/commons/3/38/Jupyter_logo.svg"
+  filterRules:
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: tpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["tpu"]
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: gpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["gpu"]
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: cpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["cpu"]
   podTemplate:
     podMetadata:
       labels:
@@ -32,6 +76,10 @@ spec:
       - name: "NB_PREFIX"
         value: |-
           {{ httpPathPrefix "jupyterlab" }}
+      - name: "LD_LIBRARY_PATH"
+        value: "/usr/local/nvidia/lib64"
+      - name: "PATH"
+        value: "/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     extraVolumeMounts:
       - name: "dshm"
         mountPath: "/dev/shm"
@@ -62,8 +110,11 @@ spec:
             spawner:
               displayName: "Jupyter TPU Custom (with Kubeflow SDK)"
               description: "JupyterLab with kubeflow and kubernetes python SDKs"
+              labels:
+                - key: accelerator
+                  value: tpu
             spec:
-              image: "JUPYTER_TPU_IMAGE_PLACEHOLDER"
+              image: "us-west1-docker.pkg.dev/sizhang-gke-dev/sizhang-repo/jupyter-tpu-notebook:local-gke-dev"
               imagePullPolicy: "Always"
               ports:
                 - id: "jupyterlab"
@@ -72,20 +123,39 @@ spec:
             spawner:
               displayName: "jupyter-scipy:v1.10.0"
               description: "JupyterLab, with SciPy Packages"
+              labels:
+                - key: accelerator
+                  value: cpu
             spec:
               image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"
                   port: 8888
+          - id: "jupyter-cuda"
+            spawner:
+              displayName: "Jupyter CUDA"
+              description: "JupyterLab with CUDA"
+              labels:
+                - key: accelerator
+                  value: gpu
+            spec:
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.10.0"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
       podConfig:
         spawner:
-          default: "tiny_cpu"
+          default: "tpu"
         values:
           - id: "tiny_cpu"
             spawner:
               displayName: "Tiny CPU"
               description: "Pod with 0.1 CPU, 128 Mb RAM"
+              labels:
+                - key: accelerator
+                  value: cpu
             spec:
               resources:
                 requests:
@@ -95,8 +165,43 @@ spec:
             spawner:
               displayName: "Small CPU"
               description: "Pod with 0.5 CPU, 1 GB RAM"
+              labels:
+                - key: accelerator
+                  value: cpu
             spec:
               resources:
                 requests:
                   cpu: 500m
                   memory: 1Gi
+          - id: "gpu_t4_spot"
+            spawner:
+              displayName: "GPU T4 Spot"
+              description: "Pod with 1 T4 GPU"
+              labels:
+                - key: accelerator
+                  value: gpu
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "gpu-t4-spot"
+              resources:
+                requests:
+                  cpu: 1000m
+                  memory: 4Gi
+                limits:
+                  nvidia.com/gpu: 1
+          - id: "tpu"
+            spawner:
+              displayName: "TPU v5 2x2"
+              description: "Pod with 4 TPU v5 lite chips"
+              labels:
+                - key: accelerator
+                  value: tpu
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "tpu-v5-4-single-host"
+              resources:
+                requests:
+                  cpu: 1000m
+                  memory: 4Gi
+                limits:
+                  google.com/tpu: 4

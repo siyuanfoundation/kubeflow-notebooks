@@ -87,16 +87,15 @@ def run_etl(spark, bucket_name, raw_dir="/tmp/raw", num_shards=2, num_records=No
 
         tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         
-        urls = [
-            "https://huggingface.co/datasets/Salesforce/wikitext/resolve/refs%2Fconvert%2Fparquet/wikitext-103-raw-v1/train/0000.parquet",
-            "https://huggingface.co/datasets/Salesforce/wikitext/resolve/refs%2Fconvert%2Fparquet/wikitext-103-raw-v1/train/0001.parquet"
-        ]
+        base_url = "https://huggingface.co/datasets/JeanKaddour/minipile/resolve/refs%2Fconvert%2Fparquet/default/train"
+        MAX_SHARDS = 12
 
         all_results = []
         
         for pdf in iterator:
             for shard_id in pdf["id"]:
-                url = urls[shard_id % len(urls)]
+                actual_id = shard_id % MAX_SHARDS
+                url = f"{base_url}/{actual_id:04d}.parquet"
                 tmp_parquet = f"/tmp/shard-{shard_id}.parquet"
                 
                 # Download the parquet file directly on the executor
@@ -108,7 +107,7 @@ def run_etl(spark, bucket_name, raw_dir="/tmp/raw", num_shards=2, num_records=No
                 shard_df = pd.read_parquet(tmp_parquet)
                 if num_records is not None and num_records > 0:
                     per_shard = num_records // num_shards
-                    start_idx = (shard_id // len(urls)) * per_shard
+                    start_idx = (shard_id // MAX_SHARDS) * per_shard
                     shard_df = shard_df.iloc[start_idx : start_idx + per_shard]
                     
                 all_tokens = []
@@ -181,7 +180,7 @@ def run_etl(spark, bucket_name, raw_dir="/tmp/raw", num_shards=2, num_records=No
     os.environ["HF_HOME"] = "/tmp/huggingface"
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     
-    test_url = "https://huggingface.co/datasets/Salesforce/wikitext/resolve/refs%2Fconvert%2Fparquet/wikitext-103-raw-v1/test/0000.parquet"
+    test_url = "https://huggingface.co/datasets/JeanKaddour/minipile/resolve/refs%2Fconvert%2Fparquet/default/test/0000.parquet"
     tmp_test_parquet = "/tmp/test.parquet"
     req = urllib.request.Request(test_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req) as response, open(tmp_test_parquet, "wb") as out_file:

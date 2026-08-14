@@ -68,14 +68,23 @@ fi
 echo "=== 3. Updating WorkspaceKind with TPU options ==="
 # Dynamically fetch image from existing jupyterlab WorkspaceKind
 IMAGE_NAME=$(kubectl get workspacekind jupyterlab -o jsonpath='{.spec.podTemplate.options.imageConfig.values[?(@.id=="jupyter-tpu-custom")].spec.image}' 2>/dev/null || echo "")
-if [ -z "${IMAGE_NAME}" ]; then
+if [ -z "${IMAGE_NAME}" ] || [ "${IMAGE_NAME}" = "JUPYTER_TPU_IMAGE_PLACEHOLDER" ]; then
   REGISTRY="${REGISTRY:-us-west1-docker.pkg.dev/sizhang-gke-dev/sizhang-repo}"
   TAG="${TAG:-local-gke-dev}"
   IMAGE_NAME="${REGISTRY}/jupyter-tpu-notebook:${TAG}"
 fi
 echo "Using custom Jupyter TPU image: ${IMAGE_NAME}"
 
-sed "s|JUPYTER_TPU_IMAGE_PLACEHOLDER|${IMAGE_NAME}|g" "${DEMO_DIR}/manifests/jupyterlab_workspacekind_scaling.yaml" | kubectl apply -f -
+# Update placeholders in place
+for file in "${DEMO_DIR}/manifests/jupyterlab_workspacekind_scaling.yaml" "${PARENT_DIR}/jupyterlab_workspacekind.yaml"; do
+  if grep -q "JUPYTER_TPU_IMAGE_PLACEHOLDER" "$file"; then
+    TMP_FILE=$(mktemp)
+    sed "s|JUPYTER_TPU_IMAGE_PLACEHOLDER|${IMAGE_NAME}|g" "$file" > "$TMP_FILE"
+    mv "$TMP_FILE" "$file"
+  fi
+done
+
+kubectl apply -f "${DEMO_DIR}/manifests/jupyterlab_workspacekind_scaling.yaml"
 
 
 echo "=== 4. Creating the scaling demo Jupyter Workspace ==="

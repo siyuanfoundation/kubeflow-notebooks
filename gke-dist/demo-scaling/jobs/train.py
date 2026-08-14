@@ -250,14 +250,15 @@ def train_scaling_model(is_local_debug=False):
             yb = train_y[idx].reshape(n_local, per_core, block_size)
             dev_params, dev_opt_state, loss = train_step(dev_params, dev_opt_state, jnp.asarray(xb), jnp.asarray(yb))
             global_step += 1
-            if global_step % 20 == 0 and process_id == 0:
+            if global_step % 1000 == 0 and process_id == 0:
                 print(f"  epoch {epoch} step {global_step} loss={float(loss[0]):.4f}", flush=True)
-            if ckpt_every and global_step % ckpt_every == 0 and process_id == 0:
-                tmp_ckpt = f"/tmp/checkpoint-{global_step}.npz"
-                with open(tmp_ckpt, "wb") as f:
-                    f.write(flax.serialization.to_bytes(unreplicate(dev_params)))
-                bucket.blob(f"model/checkpoint-{global_step}.npz").upload_from_filename(tmp_ckpt)
-                os.remove(tmp_ckpt)
+
+        if process_id == 0:
+            tmp_ckpt = f"/tmp/checkpoint-epoch-{epoch}.npz"
+            with open(tmp_ckpt, "wb") as f:
+                f.write(flax.serialization.to_bytes(unreplicate(dev_params)))
+            bucket.blob(f"model/checkpoint-epoch-{epoch}.npz").upload_from_filename(tmp_ckpt)
+            os.remove(tmp_ckpt)
 
         if process_id == 0 and test_x is not None:
             host_params = unreplicate(dev_params)
@@ -312,6 +313,10 @@ def train_scaling_model(is_local_debug=False):
                 output_text = tokenizer.decode(context[0].tolist())
                 print(f"Prompt: {p}")
                 print(f"Generated: {output_text}\n")
+
+    # JAX multihost barrier to prevent hosts from exiting before Host 0 finishes checkpointing/evaluating
+    # if n_global > n_local:
+    #     _ = pmap(lambda x: jax.lax.pmean(x, axis_name="i"), axis_name="i")(jnp.ones(n_local))
 
 if __name__ == "__main__":
     is_debug = os.environ.get("LOCAL_DEBUG", "false").lower() == "true"

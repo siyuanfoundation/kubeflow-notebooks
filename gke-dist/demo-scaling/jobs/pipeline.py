@@ -26,9 +26,8 @@ DEMO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Spark node selector — pins Spark pods to N2 nodes
 SPARK_NODE_SELECTOR = {"cloud.google.com/machine-family": "n2"}
-
 # TPU slice selector — matches the multi-host ComputeClass in tpu-compute-class.yaml.
-TPU_NODE_SELECTOR = {"cloud.google.com/compute-class": "tpu-v5-8-multi-host"}
+# TPU_NODE_SELECTOR is now dynamically generated in _tpu_placement_patch
 TPU_TOLERATIONS = [
     {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
     {"key": "cloud.google.com/compute-class", "operator": "Exists", "effect": "NoSchedule"},
@@ -47,7 +46,7 @@ def _client():
     return TrainerClient(backend_config=KubernetesBackendConfig(namespace=NAMESPACE))
 
 
-def _tpu_placement_patch(replicated_job_name="node"):
+def _tpu_placement_patch(compute_class="tpu-v5-8-multi-host", replicated_job_name="node"):
     """Return a RuntimePatch that pins pods to TPU nodes."""
     return k8s_options.RuntimePatch(
         training_runtime_spec=k8s_options.TrainingRuntimeSpecPatch(
@@ -60,12 +59,12 @@ def _tpu_placement_patch(replicated_job_name="node"):
                                 spec=k8s_options.JobSpecPatch(
                                     template=k8s_options.PodTemplatePatch(
                                         spec=k8s_options.PodSpecPatch(
-                                            node_selector=TPU_NODE_SELECTOR,
+                                            node_selector={"cloud.google.com/compute-class": compute_class},
                                             tolerations=TPU_TOLERATIONS,
                                         )
                                     )
                                 )
-                            ),
+                            )
                         )
                     ]
                 )
@@ -161,7 +160,7 @@ def print_spark_logs():
         print(f"[pipeline] error fetching logs for {driver_pod}: {e}")
 
 
-def run_training(num_hosts=2, epochs=5, global_batch_size=1024, block_size=128, vocab_size=50257, n_layer=4, n_head=4, n_embd=256, wait=True, timeout=1800):
+def run_training(num_hosts=2, tpu_compute_class="tpu-v5-8-multi-host", epochs=5, global_batch_size=1024, block_size=128, vocab_size=50257, n_layer=4, n_head=4, n_embd=256, wait=True, timeout=3600):
     """Stage 2: launch a multi-host TPU TrainJob for data-parallel training."""
     from jobs.train import train_scaling_model  # local module
 
@@ -188,28 +187,34 @@ def run_training(num_hosts=2, epochs=5, global_batch_size=1024, block_size=128, 
                 "LOCAL_DEBUG": "false",
             },
         ),
-        options=[_tpu_placement_patch()],
+        options=[_tpu_placement_patch(compute_class=tpu_compute_class)],
     )
     print(f"[pipeline] created training job: {job_id}")
     if wait:
+        print_logs(job_id, follow=True)
         client.wait_for_job_status(job_id, timeout=timeout, polling_interval=10)
     return job_id
 
 
-def print_logs(job_id):
+def print_logs(job_id, follow=False):
     """Print logs for a TPU TrainJob."""
     client = _client()
-    logs = client.get_job_logs(job_id)
-    if isinstance(logs, dict):
-        for host, log in logs.items():
-            print(f"\n--- {host} ---")
-            print(log)
+    if follow:
+        print(f"\n--- Streaming logs for {job_id} ---")
+        for logline in client.get_job_logs(name=job_id, follow=True):
+            print(logline, end="", flush=True)
     else:
-        for item in logs:
-            print(item)
+        logs = client.get_job_logs(job_id)
+        if isinstance(logs, dict):
+            for host, log in logs.items():
+                print(f"\n--- {host} ---")
+                print(log)
+        else:
+            for item in logs:
+                print(item)
 
 
-def deploy_inference(wait=True, timeout=180):
+def deploy_inference(wait=True, timeout=600):
     """Stage 4: deploy GPU inference service by creating ConfigMap and applying manifests."""
     print("[pipeline] deploying GPU inference service...")
     import subprocess
@@ -253,14 +258,13 @@ if __name__ == "__main__":
         sys.exit(1)
     
     print("=== [Pipeline] STARTING HEADLESS PIPELINE ===")
-    run_data_processing(num_executors=4, num_shards=10, num_records=1000000)
+    run_data_processing(num_executors=4, num_shards=8, num_records=160000)
     
     print("\n=== [Pipeline] WAITING FOR TPU PLACEHOLDER RELEASE ===")
     os.system("kubectl delete job tpu-job-ccc -n default --ignore-not-found")
     
     print("\n=== [Pipeline] STARTING TPU TRAINING JOB ===")
-    job = run_training(num_hosts=2, epochs=3, global_batch_size=1024, wait=True)
-    print_logs(job)
+    job = run_training(num_hosts=2, epochs=1, global_batch_size=1024, wait=True)
     
     print("\n=== [Pipeline] RE-APPLYING TPU PLACEHOLDER ===")
     os.system("kubectl apply -f ../tpu-job-ccc.yaml")

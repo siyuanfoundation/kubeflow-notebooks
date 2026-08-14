@@ -5,7 +5,7 @@ This demo showcases a highly realistic, production-scale ML workflow managed ent
 This demo expands on the base `gke-dist/demo` by introducing:
 1. **Dataset Scaling (Distributed Spark)**: Processes the industry-standard **Amazon Reviews 2023** (`raw_review_All_Beauty` subset) dataset from Hugging Face. The Spark job dynamically queries the Hugging Face API for Parquet file URLs, downloads raw reviews, constructs a distributed TF-IDF vectorizer (512 dimensions), and binarizes review ratings into sentiment categories (Label: Positive vs Negative Sentiment) in parallel across executor nodes, writing 10 compressed `.npz` shards directly to GCS.
 2. **Compute Scaling (TPU Debugging vs. Multi-Host Training)**:
-   - **Interactive local TPU debugging**: The notebook Workspace runs on a single-host TPU slice (`tpu-v5-8-single-host` with 8 cores), allowing you to interactively run JAX and debug your network architecture on a single shard of the data.
+   - **Interactive local TPU debugging**: The notebook Workspace runs on a single-host TPU slice (`tpu-v5-4-single-host` with 4 cores), allowing you to interactively run JAX and debug your network architecture on a single shard of the data.
    - **Distributed multi-host training**: Once the model code is verified, you submit a distributed `TrainJob` to a multi-host TPU slice (`tpu-v5-8-multi-host` spanning 2 nodes × 4 chips = 8 TPU cores) to train the full-scale classifier MLP on the complete dataset.
 
 ---
@@ -13,7 +13,7 @@ This demo expands on the base `gke-dist/demo` by introducing:
 ## Workflow Architecture
 
 ```
-                    Kubeflow Notebook (Single-Host TPU v5e-8)
+                    Kubeflow Notebook (Single-Host TPU v5e-4)
                      "interactive playground & control plane"
                               │
           ┌───────────────────┼───────────────────────┐
@@ -64,7 +64,7 @@ demo-scaling/
 
 1. The base `gke-dist` stack deployed and healthy.
 2. The Kubeflow Spark Operator installed.
-3. A GKE cluster with single-host TPU (`tpu-v5-8-single-host`) and multi-host TPU (`tpu-v5-8-multi-host`) ComputeClasses applied.
+3. A GKE cluster with single-host TPU (`tpu-v5-4-single-host`) and multi-host TPU (`tpu-v5-8-multi-host`) ComputeClasses applied.
 
 ---
 
