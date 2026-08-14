@@ -141,12 +141,12 @@ def run_data_processing(num_executors=4, num_shards=10, num_records=1000000, wai
 def print_spark_logs():
     """Print the Spark driver logs for the ETL job."""
     v1 = _get_k8s_core_api()
-    label_selector = f"kubeflow.org/spark-connect-name={SPARK_APP_NAME},spark-role=driver"
+    label_selector = f"sparkoperator.k8s.io/connect-name={SPARK_APP_NAME},spark-role=connect-server"
     
     pods = v1.list_namespaced_pod(NAMESPACE, label_selector=label_selector).items
     if not pods:
         # Fallback for SDK v2 naming
-        label_selector = "app.kubernetes.io/name=spark-connect"
+        label_selector = f"kubeflow.org/spark-connect-name={SPARK_APP_NAME},spark-role=driver"
         pods = v1.list_namespaced_pod(NAMESPACE, label_selector=label_selector).items
 
     if not pods:
