@@ -291,6 +291,31 @@ def train_scaling_model(is_local_debug=False):
         os.remove(tmp_metrics)
         print(f"[proc 0] TRAINING COMPLETE: {json.dumps(metrics)}", flush=True)
 
+        if is_local_debug:
+            print("\n=== Generating text from locally trained model ===")
+            import transformers
+            tokenizer = transformers.GPT2Tokenizer.from_pretrained("gpt2")
+            prompts = [
+                "The history of the world is",
+                "Machine learning provides",
+                "In the future, artificial intelligence will"
+            ]
+            
+            def generate_step(params, context):
+                logits = model.apply(params, context)
+                return jnp.argmax(logits[0, -1, :])
+                
+            jit_generate = jax.jit(generate_step)
+            for p in prompts:
+                input_ids = tokenizer.encode(p)
+                context = jnp.array([input_ids], dtype=jnp.int32)
+                for _ in range(30):
+                    next_token = jit_generate(final, context)
+                    context = jnp.concatenate([context, jnp.array([[next_token]])], axis=1)
+                output_text = tokenizer.decode(context[0].tolist())
+                print(f"Prompt: {p}")
+                print(f"Generated: {output_text}\n")
+
 if __name__ == "__main__":
     is_debug = os.environ.get("LOCAL_DEBUG", "false").lower() == "true"
     train_scaling_model(is_local_debug=is_debug)
