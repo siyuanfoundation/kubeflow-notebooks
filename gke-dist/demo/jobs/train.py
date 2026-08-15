@@ -91,8 +91,8 @@ def train_fashion_mnist():
     tmp_test = "/tmp/test.npz"
     bucket.blob("processed/test/test.npz").download_to_filename(tmp_test)
     test_d = np.load(tmp_test)
-    test_x = jnp.asarray(test_d["images"], dtype=jnp.float32)
-    test_y = jnp.asarray(test_d["labels"], dtype=jnp.float32)
+    test_x = np.asarray(test_d["images"], dtype=np.float32)
+    test_y = np.asarray(test_d["labels"], dtype=np.float32)
     os.remove(tmp_test)
 
     # --- 3. Initialize model parameters and replicate across local cores. ---
@@ -109,8 +109,20 @@ def train_fashion_mnist():
     def replicate(tree):
         return jax.tree_util.tree_map(lambda x: jnp.broadcast_to(x, (n_local,) + x.shape), tree)
 
+    def to_local_numpy(x):
+        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
+            return np.asarray(x.addressable_shards[0].data)
+        return np.asarray(x)
+
+    def to_local_scalar(x):
+        arr = to_local_numpy(x)
+        return float(arr.flat[0])
+
     def unreplicate(tree):
-        return jax.tree_util.tree_map(lambda x: np.asarray(x[0]), tree)
+        def _get_leaf(x):
+            arr = to_local_numpy(x)
+            return arr[0] if arr.ndim > 0 and arr.shape[0] == 1 else arr
+        return jax.tree_util.tree_map(_get_leaf, tree)
 
     dev_params = replicate(params)
 
@@ -122,6 +134,14 @@ def train_fashion_mnist():
         logits = forward(p, x)
         logp = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
         return -jnp.mean(jnp.sum(y * logp, axis=-1))
+
+    def eval_accuracy_fn(p, x, y):
+        logits = forward(p, x)
+        preds = jnp.argmax(logits, axis=-1)
+        labels = jnp.argmax(y, axis=-1)
+        return jnp.mean(preds == labels)
+
+    eval_step_cpu = jax.jit(eval_accuracy_fn, backend="cpu")
 
     def train_step_fn(p, x, y):
         # Average gradients across ALL cores on ALL hosts, then apply SGD.
@@ -153,7 +173,7 @@ def train_fashion_mnist():
             dev_params, loss = train_step(dev_params, jnp.asarray(xb), jnp.asarray(yb))
             global_step += 1
             if global_step % 20 == 0 and process_id == 0:
-                print(f"  epoch {epoch} step {global_step} loss={float(loss[0]):.4f}", flush=True)
+                print(f"  epoch {epoch} step {global_step} loss={to_local_scalar(loss):.4f}", flush=True)
             # Rank 0 writes periodic checkpoints to GCS.
             if ckpt_every and global_step % ckpt_every == 0 and process_id == 0:
                 tmp_ckpt = f"/tmp/checkpoint-{global_step}.npz"
@@ -164,11 +184,8 @@ def train_fashion_mnist():
         # --- Evaluate on the held-out test set once per epoch (rank 0). ---
         if process_id == 0:
             host_params = unreplicate(dev_params)
-            logits = forward({k: jnp.asarray(v) for k, v in host_params.items()}, test_x)
-            preds = jnp.argmax(logits, axis=-1)
-            labels = jnp.argmax(test_y, axis=-1)
-            acc = float(jnp.mean(preds == labels))
-            print(f"[proc 0] epoch {epoch} test_accuracy={acc:.4f}", flush=True)
+            acc = eval_step_cpu(host_params, test_x, test_y)
+            print(f"[proc 0] epoch {epoch} test_accuracy={float(acc):.4f}", flush=True)
 
     # --- 5. Persist the final model + metrics to GCS (rank 0). ---
     if process_id == 0:
@@ -178,11 +195,7 @@ def train_fashion_mnist():
         bucket.blob("model/params.npz").upload_from_filename(tmp_params)
         os.remove(tmp_params)
         
-        host_params = {k: jnp.asarray(v) for k, v in final.items()}
-        logits = forward(host_params, test_x)
-        preds = jnp.argmax(logits, axis=-1)
-        labels = jnp.argmax(test_y, axis=-1)
-        final_acc = float(jnp.mean(preds == labels))
+        final_acc = float(eval_step_cpu(final, test_x, test_y))
         metrics = {
             "final_test_accuracy": final_acc,
             "epochs": epochs,

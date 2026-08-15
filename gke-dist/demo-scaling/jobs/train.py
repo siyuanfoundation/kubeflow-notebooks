@@ -194,8 +194,8 @@ def train_scaling_model(is_local_debug=False):
     if blob_test:
         blob_test.download_to_filename(tmp_test)
         test_d = np.load(tmp_test)
-        test_x = jnp.asarray(test_d["images"], dtype=jnp.int32)
-        test_y = jnp.asarray(test_d["labels"], dtype=jnp.int32)
+        test_x = np.asarray(test_d["images"], dtype=np.int32)
+        test_y = np.asarray(test_d["labels"], dtype=np.int32)
         os.remove(tmp_test)
     else:
         test_x = test_y = None
@@ -212,8 +212,20 @@ def train_scaling_model(is_local_debug=False):
     def replicate(tree):
         return jax.tree_util.tree_map(lambda x: jnp.broadcast_to(x, (n_local,) + x.shape), tree)
 
+    def to_local_numpy(x):
+        if hasattr(x, "addressable_shards") and len(x.addressable_shards) > 0:
+            return np.asarray(x.addressable_shards[0].data)
+        return np.asarray(x)
+
+    def to_local_scalar(x):
+        arr = to_local_numpy(x)
+        return float(arr.flat[0])
+
     def unreplicate(tree):
-        return jax.tree_util.tree_map(lambda x: np.asarray(x[0]), tree)
+        def _get_leaf(x):
+            arr = to_local_numpy(x)
+            return arr[0] if arr.ndim > 0 and arr.shape[0] == 1 else arr
+        return jax.tree_util.tree_map(_get_leaf, tree)
 
     dev_params = replicate(initial_params)
     dev_opt_state = replicate(initial_opt_state)
@@ -222,6 +234,8 @@ def train_scaling_model(is_local_debug=False):
         logits = model.apply(p, x)
         loss = optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=y).mean()
         return loss
+
+    eval_step_cpu = jax.jit(loss_fn, backend="cpu")
 
     def train_step_fn(p, opt_st, x, y):
         loss, g = jax.value_and_grad(loss_fn)(p, x, y)
@@ -251,7 +265,7 @@ def train_scaling_model(is_local_debug=False):
             dev_params, dev_opt_state, loss = train_step(dev_params, dev_opt_state, jnp.asarray(xb), jnp.asarray(yb))
             global_step += 1
             if global_step % 1000 == 0 and process_id == 0:
-                print(f"  epoch {epoch} step {global_step} loss={float(loss[0]):.4f}", flush=True)
+                print(f"  epoch {epoch} step {global_step} loss={to_local_scalar(loss):.4f}", flush=True)
 
         if process_id == 0:
             tmp_ckpt = f"/tmp/checkpoint-epoch-{epoch}.npz"
@@ -262,7 +276,7 @@ def train_scaling_model(is_local_debug=False):
 
         if process_id == 0 and test_x is not None:
             host_params = unreplicate(dev_params)
-            test_loss = loss_fn(host_params, test_x[:64], test_y[:64])
+            test_loss = eval_step_cpu(host_params, test_x[:64], test_y[:64])
             print(f"[proc 0] epoch {epoch} test_loss={float(test_loss):.4f}", flush=True)
 
     if process_id == 0:
@@ -282,7 +296,7 @@ def train_scaling_model(is_local_debug=False):
         }
         if test_x is not None:
             host_params = final
-            test_loss = loss_fn(host_params, test_x[:64], test_y[:64])
+            test_loss = eval_step_cpu(host_params, test_x[:64], test_y[:64])
             metrics["final_test_loss"] = float(test_loss)
             
         tmp_metrics = "/tmp/metrics.json"
