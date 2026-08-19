@@ -83,16 +83,22 @@ spec:
     extraVolumeMounts:
       - name: "dshm"
         mountPath: "/dev/shm"
-      - name: "jupyter-ipc-config"
-        mountPath: "/etc/jupyter/jupyter_server_config.py"
-        subPath: "jupyter_server_config.py"
+      # - name: "jupyter-ipc-config"
+      #   mountPath: "/etc/jupyter/jupyter_server_config.py"
+      #   subPath: "jupyter_server_config.py"
     extraVolumes:
       - name: "dshm"
         emptyDir:
           medium: "Memory"
-      - name: "jupyter-ipc-config"
-        configMap:
-          name: "jupyter-ipc-config"
+      # - name: "jupyter-ipc-config"
+      #   configMap:
+      #     name: "jupyter-ipc-config"
+    activityProbe:
+      minProbeIntervalSeconds: 60
+      probeIntervalSeconds: 120
+      jupyter:
+        lastActivity: true
+        portId: "jupyterlab"
     securityContext:
       fsGroup: 100
     containerSecurityContext:
@@ -128,6 +134,27 @@ spec:
                   value: cpu
             spec:
               image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+          - id: "jupyter-scipy:v1.9.2"
+            spawner:
+              displayName: "jupyter-scipy:v1.9.2"
+              description: "JupyterLab, with SciPy Packages"
+              labels:
+                - key: "python_version"
+                  value: "3.11.10"
+                - key: accelerator
+                  value: cpu
+            # redirect:
+            #   to: "jupyter-scipy:v1.10.0"
+            #   message:
+            #     level: "Info"
+            #     text: >
+            #       This update does not introduce any breaking changes in Python packages from SciPy.
+            spec:
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.9.2"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"

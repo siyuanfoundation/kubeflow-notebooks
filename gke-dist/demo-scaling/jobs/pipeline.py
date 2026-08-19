@@ -133,6 +133,7 @@ def run_data_processing(num_executors=4, num_shards=10, num_records=1000000, wai
     finally:
         if wait:
             spark.stop()
+            client.delete_session(SPARK_APP_NAME)
 
     return SPARK_APP_NAME
 
