@@ -56,17 +56,50 @@ This directory contains complete build scripts, standalone manifests, dedicated 
 
 ## 3. Prerequisites
 
-Before running the deployment script, ensure your local shell environment is configured:
+### Create a GKE Cluster with Podsnapshot Enabled
 
-1. **Active GKE Cluster**: `kubectl` must target your running GKE cluster with gVisor sandbox and GKE PodSnapshot enabled.
-   ```bash
-   kubectl cluster-info
-   ```
-2. **Tools Installed**: `docker`, `kubectl`, `kustomize`, `gcloud`, and `python3`.
-3. **Artifact Registry Access**: Authenticated to your GCP Artifact Registry:
-   ```bash
-   gcloud auth configure-docker us-west1-docker.pkg.dev
-   ```
+```bash
+export REGION=us-west1
+export PROJECT_ID="${USER}-gke-dev"
+export CLUSTER_NAME=kubeflow-cluster
+export NODEPOOL_NAME=n2-pool
+
+gcloud container clusters create $CLUSTER_NAME \
+  --enable-pod-snapshots \
+  --addons=GcsFuseCsiDriver,GcpFilestoreCsiDriver \
+  --workload-pool=${PROJECT_ID}.svc.id.goog \
+  --workload-metadata=GKE_METADATA \
+  --num-nodes 3 \
+  --machine-type e2-medium \
+  --location=$REGION \
+  --enable-image-streaming \
+  --project=$PROJECT_ID
+
+gcloud container node-pools create ${NODEPOOL_NAME}-gvisor \
+    --cluster=$CLUSTER_NAME --project=$PROJECT_ID \
+    --machine-type=n2-standard-16 \
+    --location=$REGION \
+    --image-type=cos_containerd \
+    --sandbox type=gvisor \
+    --enable-autoscaling \
+    --min-nodes=0 \
+    --max-nodes=3
+
+gcloud container node-pools create $NODEPOOL_NAME \
+    --cluster=$CLUSTER_NAME --project=$PROJECT_ID \
+    --machine-type=n2-standard-16 \
+    --location=$REGION \
+    --enable-autoscaling \
+    --min-nodes=0 \
+    --max-nodes=3
+
+gcloud container clusters get-credentials $CLUSTER_NAME --location $REGION --project $PROJECT_ID
+
+```
+
+### Prepare for PodSnapshot
+
+Follow the instructions in https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots-prepare to prepare your cluster for PodSnapshot.
 
 ---
 
@@ -75,8 +108,9 @@ Before running the deployment script, ensure your local shell environment is con
 Execute the deployment script directly from this directory:
 
 ```bash
-# Optional: Specify your container registry and image tag
-export REGISTRY="us-west1-docker.pkg.dev/sizhang-gke-dev/sizhang-repo"
+# Optional: configure your container registry and image tag
+gcloud auth configure-docker ${REGION}-docker.pkg.dev
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${PROJECT_ID}-repo"
 export TAG="local-gke-dev"
 
 # Execute full build and deployment
