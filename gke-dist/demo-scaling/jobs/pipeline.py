@@ -216,37 +216,172 @@ def print_logs(job_id, follow=False):
 
 
 def deploy_inference(wait=True, timeout=600):
-    """Stage 4: deploy GPU inference service by creating ConfigMap and applying manifests."""
+    """Stage 4: deploy GPU inference service by creating ConfigMap, Deployment, and Service directly using K8s API."""
     print("[pipeline] deploying GPU inference service...")
-    import subprocess
     
-    # 1. Apply the deployment manifest, replacing BUCKET_NAME_PLACEHOLDER
-    # (This manifest also contains a placeholder ConfigMap that must be applied BEFORE we inject the real code)
-    manifest_path = os.path.join(DEMO_DIR, "manifests", "inference-service.yaml")
-    with open(manifest_path, "r") as f:
-        manifest_content = f.read()
-    manifest_content = manifest_content.replace("BUCKET_NAME_PLACEHOLDER", BUCKET_NAME)
-    
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=manifest_content, text=True, check=True)
-
-    # 2. Create or update the ConfigMap for serve.py with the REAL code
+    # Read the real serve.py code
     serve_py_path = os.path.join(DEMO_DIR, "jobs", "serve.py")
-    cm_yaml = subprocess.run([
-        "kubectl", "create", "configmap", "ml-scaling-demo-serve-code",
-        f"--from-file=serve.py={serve_py_path}",
-        "-n", NAMESPACE,
-        "--dry-run=client", "-o", "yaml"
-    ], capture_output=True, check=True, text=True).stdout
+    with open(serve_py_path, "r") as f:
+        serve_py_content = f.read()
+
+    core_api = _get_k8s_core_api()
+    apps_api = client.AppsV1Api(core_api.api_client)
     
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=cm_yaml, text=True, check=True)
+    # 1. Create or Update ConfigMap
+    cm_name = "ml-scaling-demo-serve-code"
+    config_map = client.V1ConfigMap(
+        metadata=client.V1ObjectMeta(
+            name=cm_name,
+            namespace=NAMESPACE,
+            labels={"app.kubernetes.io/part-of": "kubeflow-ml-scaling-demo"}
+        ),
+        data={"serve.py": serve_py_content}
+    )
     
-    # 3. Rollout restart
-    subprocess.run(["kubectl", "rollout", "restart", "deployment/scaling-model-inference", "-n", NAMESPACE], check=True)
+    try:
+        core_api.read_namespaced_config_map(name=cm_name, namespace=NAMESPACE)
+        core_api.replace_namespaced_config_map(name=cm_name, namespace=NAMESPACE, body=config_map)
+    except client.ApiException as e:
+        if e.status == 404:
+            core_api.create_namespaced_config_map(namespace=NAMESPACE, body=config_map)
+        else:
+            raise
+
+    # 2. Create or Update Deployment
+    deployment_name = "scaling-model-inference"
+    deployment = client.V1Deployment(
+        metadata=client.V1ObjectMeta(
+            name=deployment_name,
+            namespace=NAMESPACE,
+            labels={
+                "app": "scaling-model-inference",
+                "app.kubernetes.io/part-of": "kubeflow-ml-scaling-demo"
+            }
+        ),
+        spec=client.V1DeploymentSpec(
+            replicas=1,
+            selector=client.V1LabelSelector(
+                match_labels={"app": "scaling-model-inference"}
+            ),
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "app": "scaling-model-inference",
+                        "app.kubernetes.io/part-of": "kubeflow-ml-scaling-demo"
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    node_selector={"cloud.google.com/compute-class": "gpu-t4-spot"},
+                    tolerations=[
+                        client.V1Toleration(key="nvidia.com/gpu", operator="Exists", effect="NoSchedule"),
+                        client.V1Toleration(key="cloud.google.com/compute-class", operator="Exists", effect="NoSchedule")
+                    ],
+                    containers=[
+                        client.V1Container(
+                            name="server",
+                            image="pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime",
+                            command=["bash", "-c"],
+                            args=[
+                                "pip install --no-cache-dir google-cloud-storage >/dev/null 2>&1\nexec python /app/serve.py\n"
+                            ],
+                            env=[
+                                client.V1EnvVar(name="BUCKET_NAME", value=BUCKET_NAME),
+                                client.V1EnvVar(name="PORT", value="8080")
+                            ],
+                            ports=[client.V1ContainerPort(container_port=8080)],
+                            volume_mounts=[
+                                client.V1VolumeMount(name="serve-code", mount_path="/app")
+                            ],
+                            readiness_probe=client.V1Probe(
+                                http_get=client.V1HTTPGetAction(path="/healthz", port=8080),
+                                initial_delay_seconds=15,
+                                period_seconds=5
+                            ),
+                            liveness_probe=client.V1Probe(
+                                http_get=client.V1HTTPGetAction(path="/livez", port=8080),
+                                initial_delay_seconds=600,
+                                period_seconds=15
+                            ),
+                            resources=client.V1ResourceRequirements(
+                                requests={"cpu": "2", "memory": "8Gi", "nvidia.com/gpu": "1"},
+                                limits={"cpu": "2", "memory": "8Gi", "nvidia.com/gpu": "1"}
+                            )
+                        )
+                    ],
+                    volumes=[
+                        client.V1Volume(
+                            name="serve-code",
+                            config_map=client.V1ConfigMapVolumeSource(name=cm_name)
+                        )
+                    ]
+                )
+            )
+        )
+    )
+
+    try:
+        apps_api.read_namespaced_deployment(name=deployment_name, namespace=NAMESPACE)
+        # Force a rollout restart
+        import datetime
+        deployment.spec.template.metadata.annotations = {
+            "kubectl.kubernetes.io/restartedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        }
+        apps_api.replace_namespaced_deployment(name=deployment_name, namespace=NAMESPACE, body=deployment)
+    except client.ApiException as e:
+        if e.status == 404:
+            apps_api.create_namespaced_deployment(namespace=NAMESPACE, body=deployment)
+        else:
+            raise
+
+    # 3. Create or Update Service
+    service_name = "scaling-model-inference"
+    service = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=service_name,
+            namespace=NAMESPACE,
+            labels={
+                "app": "scaling-model-inference",
+                "app.kubernetes.io/part-of": "kubeflow-ml-scaling-demo"
+            }
+        ),
+        spec=client.V1ServiceSpec(
+            selector={"app": "scaling-model-inference"},
+            ports=[
+                client.V1ServicePort(name="http", port=80, target_port=8080)
+            ],
+            type="ClusterIP"
+        )
+    )
     
+    try:
+        existing_svc = core_api.read_namespaced_service(name=service_name, namespace=NAMESPACE)
+        service.metadata.resource_version = existing_svc.metadata.resource_version
+        service.spec.cluster_ip = existing_svc.spec.cluster_ip
+        core_api.replace_namespaced_service(name=service_name, namespace=NAMESPACE, body=service)
+    except client.ApiException as e:
+        if e.status == 404:
+            core_api.create_namespaced_service(namespace=NAMESPACE, body=service)
+        else:
+            raise
+
     # 4. Wait for rollout
     if wait:
         print("[pipeline] waiting for inference rollout...")
-        subprocess.run(["kubectl", "rollout", "status", "deployment/scaling-model-inference", "-n", NAMESPACE, f"--timeout={timeout}s"], check=True)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                dep = apps_api.read_namespaced_deployment(name=deployment_name, namespace=NAMESPACE)
+                if dep.status and \
+                   dep.status.ready_replicas == dep.spec.replicas and \
+                   dep.status.updated_replicas == dep.spec.replicas and \
+                   dep.status.replicas == dep.spec.replicas:
+                    break
+            except client.ApiException:
+                pass
+            time.sleep(5)
+        else:
+            print("[pipeline] Warning: Timeout waiting for inference rollout.")
+            
     print("[pipeline] Inference service is up.")
 
 
@@ -261,16 +396,100 @@ if __name__ == "__main__":
     print("=== [Pipeline] STARTING HEADLESS PIPELINE ===")
     run_data_processing(num_executors=4, num_shards=8, num_records=160000)
     
+    core_api = _get_k8s_core_api()
+    batch_api = client.BatchV1Api(core_api.api_client)
+    crd_api = client.CustomObjectsApi(core_api.api_client)
+
     print("\n=== [Pipeline] WAITING FOR TPU PLACEHOLDER RELEASE ===")
-    os.system("kubectl delete job tpu-job-ccc -n default --ignore-not-found")
+    try:
+        batch_api.delete_namespaced_job(
+            name="tpu-job-ccc", 
+            namespace="default",
+            propagation_policy="Background"
+        )
+    except client.ApiException as e:
+        if e.status != 404:
+            print(f"Error deleting TPU placeholder job: {e}")
     
     print("\n=== [Pipeline] STARTING TPU TRAINING JOB ===")
     job = run_training(num_hosts=2, epochs=1, global_batch_size=1024, wait=True)
     
     print("\n=== [Pipeline] RE-APPLYING TPU PLACEHOLDER ===")
-    os.system("kubectl apply -f ../tpu-job-ccc.yaml")
+    # 1. Create Headless Service
+    svc_name = "headless-svc-ccc"
+    svc = client.V1Service(
+        metadata=client.V1ObjectMeta(name=svc_name),
+        spec=client.V1ServiceSpec(
+            cluster_ip="None",
+            selector={"job-name": "tpu-job-ccc"}
+        )
+    )
+    try:
+        existing_svc = core_api.read_namespaced_service(name=svc_name, namespace="default")
+        svc.metadata.resource_version = existing_svc.metadata.resource_version
+        core_api.replace_namespaced_service(name=svc_name, namespace="default", body=svc)
+    except client.ApiException as e:
+        if e.status == 404:
+            core_api.create_namespaced_service(namespace="default", body=svc)
+        else:
+            print(f"Error creating service: {e}")
+            
+    # 2. Create Job
+    tpu_job = client.V1Job(
+        metadata=client.V1ObjectMeta(name="tpu-job-ccc"),
+        spec=client.V1JobSpec(
+            backoff_limit=0,
+            completions=2,
+            parallelism=2,
+            completion_mode="Indexed",
+            template=client.V1PodTemplateSpec(
+                spec=client.V1PodSpec(
+                    subdomain=svc_name,
+                    restart_policy="Never",
+                    node_selector={"cloud.google.com/compute-class": "tpu-v5-8-multi-host"},
+                    tolerations=[
+                        client.V1Toleration(key="google.com/tpu", operator="Exists", effect="NoSchedule")
+                    ],
+                    containers=[
+                        client.V1Container(
+                            name="tpu-job",
+                            image="us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest",
+                            ports=[
+                                client.V1ContainerPort(container_port=8471),
+                                client.V1ContainerPort(container_port=8431)
+                            ],
+                            command=["bash", "-c"],
+                            args=["python -c 'import jax; print(\"TPU cores:\", jax.device_count())'\nsleep 432000\n"],
+                            resources=client.V1ResourceRequirements(
+                                requests={"cpu": "10", "memory": "128Gi", "google.com/tpu": "4"},
+                                limits={"cpu": "10", "memory": "128Gi", "google.com/tpu": "4"}
+                            )
+                        )
+                    ]
+                )
+            )
+        )
+    )
+    try:
+        batch_api.read_namespaced_job(name="tpu-job-ccc", namespace="default")
+        print("TPU placeholder job already exists.")
+    except client.ApiException as e:
+        if e.status == 404:
+            batch_api.create_namespaced_job(namespace="default", body=tpu_job)
+        else:
+            print(f"Error creating TPU job: {e}")
     
     print("\n=== [Pipeline] CLEANING UP SPARK CONNECT ===")
-    os.system(f"kubectl delete sparkconnect {SPARK_APP_NAME} -n {NAMESPACE} --ignore-not-found")
+    try:
+        crd_api.delete_namespaced_custom_object(
+            group="sparkoperator.k8s.io",
+            version="v1alpha1",
+            namespace=NAMESPACE,
+            plural="sparkconnects",
+            name=SPARK_APP_NAME
+        )
+    except client.ApiException as e:
+        if e.status != 404:
+            print(f"Error deleting SparkConnect: {e}")
     
     print("\n=== [Pipeline] HEADLESS PIPELINE COMPLETE ===")
