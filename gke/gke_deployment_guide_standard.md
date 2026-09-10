@@ -51,9 +51,9 @@ kubectl cluster-info
 - `python3` with `bcrypt` (for generating password hashes)
 
 ### User & Namespace Configuration
-Define two distinct users—a **Workspace Admin** (`ADMIN_NAME`, who can manage cluster-wide `WorkspaceKind` templates and view all workspaces) and a **Standard User** (`USER_NAME`, who uses only their own namespace):
+Define two distinct users—a **Workspace Admin** (`ADMIN_NAME`, who can see and edit cluster-wide `WorkspaceKind` templates in the UI) and a **Standard User** (`USER_NAME`). In the **Workspaces** tab, both users only see workspaces within their own namespace; the only UI difference for `ADMIN_NAME` is access to the **Workspace kinds** tab to view and edit `WorkspaceKind` (`wsk`) templates:
 ```bash
-# 1. Workspace Admin (full cluster-wide access to WorkspaceKinds & all Workspaces)
+# 1. Workspace Admin (can view and edit cluster-wide WorkspaceKind templates)
 export ADMIN_NAME="admin@example.com"
 export ADMIN_PASSWORD="admin1234"
 export ADMIN_NAMESPACE="kubeflow-admin-example-com"
@@ -218,6 +218,9 @@ Deploy the Kubeflow Trainer controller manager, JobSet controller manager, and c
 ```bash
 # Note: `--server-side --force-conflicts` is used because Trainer and JobSet CRDs exceed
 # the 256KB client-side apply annotation limit.
+# The first apply installs the CRDs; wait for CRDs to establish before re-applying ClusterTrainingRuntimes.
+kubectl apply -k applications/trainer/overlays --server-side --force-conflicts || true
+kubectl wait --for=condition=Established crd/clustertrainingruntimes.trainer.kubeflow.org --timeout=60s
 kubectl apply -k applications/trainer/overlays --server-side --force-conflicts
 ```
 *(On GKE Standard, the upstream RBAC bindings to `system:authenticated` succeed without restriction.)*
@@ -267,10 +270,10 @@ kubectl apply -f applications/workspaces/upstream/controller/samples/jupyterlab_
 > kubectl patch wsk jupyterlab --type='json' -p='[{"op": "remove", "path": "/spec/filterRules"}]'
 > ```
 
-2. **Grant Admin User (`$ADMIN_NAME`) Full Cluster-Wide Access to Workspaces**:
+2. **Grant Admin User (`$ADMIN_NAME`) Cluster Access to WorkspaceKind Templates**:
 How permissions differ between the two users:
-- **Standard User (`$USER_NAME`)**: Needs **no `ClusterRoleBinding` at all**. When `$USER_NAME` clicks **New Workspace**, the backend calls `GET /api/v1/workspacekinds?namespaceFilter=${USER_NAMESPACE}`, which only checks namespaced `create` permission on `workspaces` (automatically granted by their `Profile`). They can create, use, and connect to their own workspaces, but cannot access the administrative **Workspace kinds** tab or other namespaces.
-- **Admin User (`$ADMIN_NAME`)**: Needs cluster-wide permissions (`kubeflow-admin` + `storageclasses` read access) to manage `WorkspaceKind` templates in the **Workspace kinds** tab and inspect active workspaces across all namespaces.
+- **Standard User (`$USER_NAME`)**: Needs **no `ClusterRoleBinding` at all**. When `$USER_NAME` clicks **New Workspace**, the backend calls `GET /api/v1/workspacekinds?namespaceFilter=${USER_NAMESPACE}`, which only checks namespaced `create` permission on `workspaces` (automatically granted by their `Profile`). They can create, use, and connect to workspaces in their own namespace, but cannot access the **Workspace kinds** tab.
+- **Admin User (`$ADMIN_NAME`)**: Just like the standard user, `$ADMIN_NAME` only sees their own namespace (`$ADMIN_NAMESPACE`) in the **Workspaces** tab. The **only thing `$ADMIN_NAME` can do differently in the UI** is access the **Workspace kinds** tab to view and edit cluster-wide `WorkspaceKind` (`wsk`) templates.
 
 Apply the `kubeflow-admin` and cluster storage/runtime bindings for `${ADMIN_NAME}`:
 ```bash
