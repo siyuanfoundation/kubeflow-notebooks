@@ -30,14 +30,12 @@ kubectl annotate storageclass standard-rwo \
 # 2. Clone kubeflow-community-distribution (Pure Upstream Manifests)
 # ==============================================================================
 echo "=================================================================="
-echo "Preparing kubeflow-community-distribution (26.03.1)..."
+echo "Preparing kubeflow-community-distribution (HEAD / master)..."
 echo "=================================================================="
 if [ ! -d "${REPO_DIR}" ]; then
-  git clone --branch 26.03.1 https://github.com/kubeflow/community-distribution.git "${REPO_DIR}"
+  git clone https://github.com/kubeflow/community-distribution.git "${REPO_DIR}"
 else
-  echo "Directory ${REPO_DIR} already exists, ensuring branch/tag 26.03.1..."
-  git -C "${REPO_DIR}" fetch --tags
-  git -C "${REPO_DIR}" checkout 26.03.1
+  echo "Directory ${REPO_DIR} already exists"
 fi
 
 cd "${REPO_DIR}"

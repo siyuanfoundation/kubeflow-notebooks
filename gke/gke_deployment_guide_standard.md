@@ -81,9 +81,9 @@ kubectl annotate storageclass standard-rwo \
 
 All commands are executed from the root of [`kubeflow-community-distribution`](https://github.com/kubeflow/community-distribution):
 ```bash
-git clone --branch 26.03.1 https://github.com/kubeflow/community-distribution.git
+git clone https://github.com/kubeflow/community-distribution.git
 
-cd kubeflow-community-distribution
+cd community-distribution
 ```
 
 ### Step 1: Deploy Cert-Manager
