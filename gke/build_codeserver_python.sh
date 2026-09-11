@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build and Push Custom Kubeflow Code-Server Python Image (with Antigravity)
+# Build and Push Custom Kubeflow Code-Server Python Image (with Gemini Code Assist)
 # Target Registry: ${REGION}-docker.pkg.dev/${PROJECT_ID}/kubeflow-repo
 #
 # Reference:
@@ -18,7 +18,7 @@ export PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null |
 export REGION="${REGION:-us-west1}"
 export REPO_NAME="${REPO_NAME:-kubeflow-repo}"
 export IMAGE_NAME="${IMAGE_NAME:-codeserver-python}"
-export IMAGE_TAG="${IMAGE_TAG:-antigravity}"
+export IMAGE_TAG="${IMAGE_TAG:-gemini}"
 
 # Default build mode: fast (extends upstream codeserver-python:v1.11.0)
 # Use --full to build from upstream codeserver:v1.11.0 (full Miniforge/Conda install)
@@ -31,17 +31,16 @@ show_usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Build and push a custom Kubeflow VS Code (codeserver-python) image with Google
-Antigravity, Gemini Code Assist, and Google Cloud Code extensions to Google
-Artifact Registry:
+Build and push a custom Kubeflow VS Code (codeserver-python) image with Gemini
+Code Assist, numpy, and pandas to Google Artifact Registry:
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}
 
 Environment Variables:
   PROJECT_ID   Google Cloud Project ID (default: current gcloud project)
-  REGION       Google Cloud Region (default: us-central1)
+  REGION       Google Cloud Region (default: us-west1)
   REPO_NAME    Artifact Registry repository name (default: kubeflow-repo)
   IMAGE_NAME   Docker image name (default: codeserver-python)
-  IMAGE_TAG    Docker image tag (default: antigravity)
+  IMAGE_TAG    Docker image tag (default: gemini)
 
 Options:
   --fast                     Fast layer build extending upstream codeserver-python:v1.11.0 (default)
@@ -96,7 +95,7 @@ fi
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo "=================================================================="
-echo "Custom Kubeflow Code-Server Python Image Builder (with Antigravity)"
+echo "Custom Kubeflow Code-Server Python Image Builder (Gemini Code Assist)"
 echo "=================================================================="
 echo "Project ID:       ${PROJECT_ID}"
 echo "Region:           ${REGION}"

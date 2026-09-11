@@ -416,10 +416,21 @@ Because standard users only need namespaced permissions in their own `Profile` n
 
 ---
 
-## 4. Exposing & Accessing the Central Dashboard
+## 4. Exposing & Accessing the Central Dashboard (Secure Context for VS Code / code-server)
 
-### Option A: Local Port-Forwarding (Recommended)
-Port-forward the Ingress Gateway to your local machine:
+> [!IMPORTANT]
+> **Why VS Code (`code-server`) and Coding Agents Require HTTPS or `localhost`**:
+> Modern web browsers enforce the W3C **Secure Context** specification (`window.isSecureContext`). Plain HTTP on a non-local IP address (`http://<EXTERNAL-IP>/`) is treated as an **insecure context**, which disables:
+> - **Service Workers (`navigator.serviceWorker`)**: Required by VS Code Webviews (`vscode-webview://`) to render **Gemini Code Assist**, coding agents, and the Jupyter extension.
+> - **Clipboard API (`navigator.clipboard`)**: Copy/paste shortcuts and agent clipboard actions fail.
+> - **WebCrypto API (`window.crypto.subtle`)**: Used for extension state signing.
+>
+> To avoid the warning `"code-server is being accessed in an insecure context..."` and ensure coding agents work properly, use **Option A (`http://localhost:8085/`)** or **Option B1 (`https://<EXTERNAL-IP>.sslip.io/`)**.
+
+---
+
+### Option A: Local Port-Forwarding (`http://localhost:8085/`)
+Browsers natively treat `http://localhost:*` as a **Secure Context** (`window.isSecureContext === true`) even over plain HTTP. Port-forward the Ingress Gateway to your local machine:
 ```bash
 kubectl port-forward svc/istio-ingressgateway -n istio-system 8085:80
 ```
@@ -427,25 +438,211 @@ Navigate in your browser to:
 ```
 http://localhost:8085/
 ```
-*(Recommended for developer environments or corporate networks with strict outbound egress policies).*
+*(All VS Code Webviews, clipboard operations, and coding agents work out-of-the-box).*
 
-### Option B: Public GKE LoadBalancer IP
-By default, `kubeflow-community-distribution` configures `istio-ingressgateway` as `type: ClusterIP` for security. To expose it via a public GKE LoadBalancer IP, patch the service type:
+---
+
+### Option B1: Public GKE LoadBalancer with Trusted Let's Encrypt HTTPS (`https://<EXTERNAL-IP>.sslip.io/`)
+
+`deploy_standard.sh` automatically provisions a **free, publicly trusted Let's Encrypt HTTPS certificate** for your GKE LoadBalancer IP using `<EXTERNAL-IP>.sslip.io`.
+
+Get your external HTTPS URL:
 ```bash
-kubectl patch svc istio-ingressgateway -n istio-system -p '{"spec": {"type": "LoadBalancer"}}'
-```
-
-> [!IMPORTANT]
-> **Browser HTTPS Auto-Upgrade**: Modern browsers automatically attempt `https://<EXTERNAL-IP>/`. Since the default Kubeflow Gateway listens on HTTP (port 80) without a TLS certificate on port 443, connections to HTTPS will time out. You **must** explicitly type the `http://` scheme: `http://<EXTERNAL-IP>/`.
-
-Get the external IP (may take ~30–60 seconds to provision):
-```bash
-kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+EXTERNAL_IP=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "https://${EXTERNAL_IP}.sslip.io/"
 ```
 Open in your browser:
 ```
-http://<EXTERNAL-IP>/
+https://<EXTERNAL-IP>.sslip.io/
 ```
+
+#### How `SSLIP_DOMAIN`, `IngressClass`, and `cert-manager` Work Together (Beginner's Guide)
+
+If you are new to Kubernetes networking, DNS, and TLS certificates, here is how `deploy_standard.sh` gets a browser-trusted HTTPS certificate without requiring you to buy a domain name or configure DNS:
+
+```mermaid
+sequenceDiagram
+    participant User as User Browser
+    participant DNS as sslip.io DNS
+    participant LE as Let's Encrypt CA
+    participant IGW as Istio IngressGateway<br/>(GKE LoadBalancer IP)
+    participant CM as cert-manager<br/>(ACME Solver Pod)
+
+    Note over IGW,CM: 1. cert-manager requests cert for <IP>.sslip.io
+    CM->>LE: Request TLS Certificate for 34.53.68.77.sslip.io
+    LE->>DNS: Resolve 34.53.68.77.sslip.io
+    DNS-->>LE: Returns 34.53.68.77
+    LE->>IGW: HTTP GET /.well-known/acme-challenge/<TOKEN>
+    Note over IGW: AuthorizationPolicy exempts path from Dex login<br/>IngressClass/istio routes request to solver pod
+    IGW->>CM: Forward challenge request to solver pod
+    CM-->>LE: Return HTTP 200 (<TOKEN> verified)
+    LE-->>CM: Issue signed TLS Certificate
+    Note over IGW,CM: 2. cert-manager saves Secret 'kubeflow-ingressgateway-certs'<br/>kubeflow-gateway loads TLS cert on port 443
+    User->>IGW: HTTPS GET https://34.53.68.77.sslip.io/
+    IGW-->>User: Trusted HTTPS Response (Secure Context = true)
+```
+
+1. **Why `SSLIP_DOMAIN` (`<EXTERNAL-IP>.sslip.io`)?**
+   - Public Certificate Authorities like **Let's Encrypt** refuse to issue trusted HTTPS certificates for bare IP addresses (e.g., `34.53.68.77`); they only issue certificates for **domain names**.
+   - Buying a custom domain name and configuring DNS records takes time and money.
+   - **[sslip.io](https://sslip.io/)** is a free, public "magic" DNS service: whenever any computer on the internet queries `<IP>.sslip.io` (for example, `34.53.68.77.sslip.io`), `sslip.io`'s DNS servers automatically extract the IP from the hostname and reply with `34.53.68.77`.
+   - This gives your GKE LoadBalancer IP an instant, valid domain name (`SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"`) with zero DNS setup.
+
+2. **How Let's Encrypt Verifies Ownership (`ACME HTTP-01 Challenge`)**:
+   - When `cert-manager` asks Let's Encrypt for a certificate for `34.53.68.77.sslip.io`, Let's Encrypt must verify that you actually control the server at `34.53.68.77`.
+   - Let's Encrypt gives `cert-manager` a random token and makes an HTTP request from the public internet to:
+     `http://34.53.68.77.sslip.io/.well-known/acme-challenge/<TOKEN>`
+   - To answer that request, `cert-manager` creates a temporary pod (`cm-acme-http-solver-*`) inside your cluster that serves the expected token.
+
+3. **Why `IngressClass/istio` is Required**:
+   - To route incoming traffic from the GKE LoadBalancer (`istio-ingressgateway`) to that temporary solver pod, `cert-manager` creates a standard Kubernetes `Ingress` resource marked with `ingressClassName: istio`.
+   - Kubernetes ignores `ingressClassName: istio` unless an `IngressClass` object named `istio` (`controller: istio.io/ingress-controller`) is registered in the cluster.
+   - Creating `IngressClass/istio` tells Istio's control plane (`istiod`) to watch `cert-manager`'s temporary `Ingress` rules and automatically route `/.well-known/acme-challenge/*` traffic through `istio-ingressgateway` to the solver pod.
+
+4. **Why Istio `AuthorizationPolicy` Must Exempt `/.well-known/acme-challenge/*`**:
+   - By default, Kubeflow secures every URL on `istio-ingressgateway` behind `oauth2-proxy` (`istio-ingressgateway-oauth2-proxy` and `istio-ingressgateway-require-jwt`).
+   - If an unauthenticated visitor—including Let's Encrypt's verification bot—requests `/.well-known/acme-challenge/<TOKEN>`, Kubeflow blocks the request and returns a Dex login page (`403 Forbidden`). Let's Encrypt sees the login page instead of the token, and certificate issuance fails.
+   - Adding `/.well-known/acme-challenge/*` to `notPaths` in both `AuthorizationPolicy` resources tells Istio: *"Allow unauthenticated access to `/.well-known/acme-challenge/*` so Let's Encrypt can verify domain ownership."*
+
+5. **How `kubeflow-gateway` Serves HTTPS on Port 443**:
+   - Once Let's Encrypt verifies the token (typically in ~15 seconds), `cert-manager` stores the signed TLS certificate and private key in a Kubernetes Secret named `kubeflow-ingressgateway-certs` in the `istio-system` namespace.
+   - Finally, `kubeflow-gateway` is updated with an HTTPS listener on port `443` referencing `credentialName: kubeflow-ingressgateway-certs`. The Istio Ingress Gateway immediately begins serving browser-trusted HTTPS traffic.
+
+#### Step-by-Step Commands (Automated by `deploy_standard.sh`)
+
+If you want to inspect or apply the HTTPS configuration manually on an existing cluster:
+
+```bash
+EXTERNAL_IP=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"
+
+# 1. Register IngressClass 'istio' & exempt ACME challenge paths from OAuth2 login
+kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: istio
+spec:
+  controller: istio.io/ingress-controller
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-ingressgateway-oauth2-proxy
+  namespace: istio-system
+spec:
+  action: CUSTOM
+  provider:
+    name: oauth2-proxy
+  rules:
+  - to:
+    - operation:
+        notPaths:
+        - /dex/*
+        - /dex/**
+        - /oauth2/*
+        - /.well-known/acme-challenge/*
+    when:
+    - key: request.headers[authorization]
+      notValues:
+      - '*'
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-ingressgateway-require-jwt
+  namespace: istio-system
+spec:
+  action: DENY
+  rules:
+  - from:
+    - source:
+        notRequestPrincipals:
+        - '*'
+    to:
+    - operation:
+        notPaths:
+        - /dex/*
+        - /dex/**
+        - /oauth2/*
+        - /.well-known/acme-challenge/*
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+EOF
+
+# 2. Create Let's Encrypt ClusterIssuer & Certificate for <EXTERNAL-IP>.sslip.io
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - http01:
+        ingress:
+          ingressClassName: istio
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubeflow-ingressgateway-certs
+  namespace: istio-system
+spec:
+  secretName: kubeflow-ingressgateway-certs
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - ${SSLIP_DOMAIN}
+EOF
+
+# 3. Wait for Let's Encrypt certificate to become Ready (~15-30 seconds)
+kubectl wait --for=condition=Ready certificate/kubeflow-ingressgateway-certs -n istio-system --timeout=90s
+
+# 4. Enable HTTPS (port 443) on kubeflow-gateway
+kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: kubeflow-gateway
+  namespace: kubeflow
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - hosts:
+    - '*'
+    port:
+      name: http
+      number: 80
+      protocol: HTTP
+  - hosts:
+    - '*'
+    port:
+      name: https
+      number: 443
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: kubeflow-ingressgateway-certs
+EOF
+```
+
+---
+
+### Option B2: Chrome Flag for Plain HTTP IP (`http://<EXTERNAL-IP>/`)
+If you must access via raw IP over HTTP (`http://<EXTERNAL-IP>/`), you can instruct Chrome/Edge to treat the IP as a Secure Context:
+1. Open `chrome://flags/#unsafely-treat-insecure-origin-as-secure` in your browser.
+2. Add your LoadBalancer origin: `http://<EXTERNAL-IP>`
+3. Enable the flag and click **Relaunch**.
 
 ---
 

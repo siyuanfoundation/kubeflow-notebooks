@@ -47,17 +47,17 @@ spec:
     options:
       imageConfig:
         spawner:
-          default: "codeserver-python-antigravity"
+          default: "codeserver-python-gemini"
         values:
-          - id: "codeserver-python-antigravity"
+          - id: "codeserver-python-gemini"
             spawner:
-              displayName: "codeserver-python (Antigravity + Gemini)"
-              description: "code-server with Conda Python, Google Antigravity, Gemini Code Assist, and Cloud Code"
+              displayName: "codeserver-python (Gemini Code Assist)"
+              description: "code-server with Conda Python, numpy, pandas, and Gemini Code Assist"
               labels:
                 - key: "python_version"
                   value: "3.12"
-                - key: "antigravity"
-                  value: "1.3.0"
+                - key: "geminicodeassist"
+                  value: "2.100.0"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}"
               imagePullPolicy: "Always"

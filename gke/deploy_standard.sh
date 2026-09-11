@@ -309,10 +309,155 @@ if [ "${EXPOSE_MODE}" = "loadbalancer" ]; then
   done
 
   if [ -n "${EXTERNAL_IP}" ]; then
+    SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"
+    echo "Configuring HTTPS (Let's Encrypt TLS certificate via cert-manager) for ${SSLIP_DOMAIN}..."
+
+    # 1. Create Istio IngressClass and allow /.well-known/acme-challenge/* in Istio AuthorizationPolicies
+    kubectl apply -f - <<EOF
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: istio
+spec:
+  controller: istio.io/ingress-controller
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-ingressgateway-oauth2-proxy
+  namespace: istio-system
+spec:
+  action: CUSTOM
+  provider:
+    name: oauth2-proxy
+  rules:
+  - to:
+    - operation:
+        notPaths:
+        - /dex/*
+        - /dex/**
+        - /oauth2/*
+        - /.well-known/acme-challenge/*
+    when:
+    - key: request.headers[authorization]
+      notValues:
+      - '*'
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: istio-ingressgateway-require-jwt
+  namespace: istio-system
+spec:
+  action: DENY
+  rules:
+  - from:
+    - source:
+        notRequestPrincipals:
+        - '*'
+    to:
+    - operation:
+        notPaths:
+        - /dex/*
+        - /dex/**
+        - /oauth2/*
+        - /.well-known/acme-challenge/*
+  selector:
+    matchLabels:
+      app: istio-ingressgateway
+EOF
+
+    # 2. Create Let's Encrypt ClusterIssuer and Certificate in istio-system
+    kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - http01:
+        ingress:
+          ingressClassName: istio
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubeflow-ingressgateway-certs
+  namespace: istio-system
+spec:
+  secretName: kubeflow-ingressgateway-certs
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - ${SSLIP_DOMAIN}
+EOF
+
+    echo "Waiting for Let's Encrypt certificate to be issued for ${SSLIP_DOMAIN} (up to 90s)..."
+    if ! kubectl wait --for=condition=Ready certificate/kubeflow-ingressgateway-certs -n istio-system --timeout=90s; then
+      echo "WARNING: Let's Encrypt issuance timed out; falling back to kubeflow-self-signing-issuer..."
+      kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubeflow-ingressgateway-certs
+  namespace: istio-system
+spec:
+  secretName: kubeflow-ingressgateway-certs
+  issuerRef:
+    name: kubeflow-self-signing-issuer
+    kind: ClusterIssuer
+  ipAddresses:
+  - ${EXTERNAL_IP}
+  dnsNames:
+  - ${SSLIP_DOMAIN}
+EOF
+      kubectl wait --for=condition=Ready certificate/kubeflow-ingressgateway-certs -n istio-system --timeout=60s || true
+    fi
+
+    # 3. Enable HTTPS (port 443) on kubeflow-gateway
+    kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: kubeflow-gateway
+  namespace: kubeflow
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - hosts:
+    - '*'
+    port:
+      name: http
+      number: 80
+      protocol: HTTP
+  - hosts:
+    - '*'
+    port:
+      name: https
+      number: 443
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: kubeflow-ingressgateway-certs
+EOF
+
     echo "=================================================================="
     echo "Kubeflow Central Dashboard is exposed via Public LoadBalancer!"
-    echo "External URL: http://${EXTERNAL_IP}/"
-    echo "NOTE: Use http:// (not https://) when accessing in your browser."
+    echo ""
+    echo "Option B1 (Recommended — Trusted HTTPS for VS Code / code-server):"
+    echo "  https://${SSLIP_DOMAIN}/"
+    echo ""
+    echo "Option B2 (HTTP via LoadBalancer IP):"
+    echo "  http://${EXTERNAL_IP}/"
     echo "=================================================================="
   else
     echo "WARNING: Timed out waiting for LoadBalancer IP. Check status with:"
@@ -321,7 +466,7 @@ if [ "${EXPOSE_MODE}" = "loadbalancer" ]; then
 fi
 
 echo ""
-echo "Option A (Local Port-Forwarding):"
+echo "Option A (Local Port-Forwarding — Secure Context via localhost):"
 echo "  kubectl port-forward svc/istio-ingressgateway -n istio-system 8085:80"
 echo "  Then open: http://localhost:8085/"
 echo ""

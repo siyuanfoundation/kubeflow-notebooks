@@ -85,8 +85,11 @@ kubectl delete -k common/istio/istio-namespace/base --ignore-not-found=true --wa
 kubectl delete -k common/istio/istio-crds/base --ignore-not-found=true --wait=false || true
 
 echo "=================================================================="
-echo "Step 8: Deleting Cert-Manager..."
+echo "Step 8: Deleting Cert-Manager & Ingress Certificates..."
 echo "=================================================================="
+kubectl delete certificate kubeflow-ingressgateway-certs -n istio-system --ignore-not-found=true --wait=false || true
+kubectl delete clusterissuer letsencrypt-prod --ignore-not-found=true --wait=false || true
+kubectl delete ingressclass istio --ignore-not-found=true --wait=false || true
 kubectl delete -k common/cert-manager/overlays/kubeflow --ignore-not-found=true --wait=false || true
 kubectl delete -k common/cert-manager/base --ignore-not-found=true --wait=false || true
 
