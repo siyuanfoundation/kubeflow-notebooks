@@ -1,5 +1,5 @@
-# Kubeflow packages (CPU)
-jax[cpu]
+# Kubeflow packages (TPU)
+jax[tpu]
 kfp==2.16.1
 kubeflow==0.4.0
 matplotlib

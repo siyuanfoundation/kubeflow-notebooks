@@ -1,0 +1,9 @@
+# Kubeflow packages (GPU / CUDA)
+jax[cuda12]
+torch
+torchvision
+kfp==2.16.1
+kubeflow==0.4.0
+matplotlib
+numpy
+pandas

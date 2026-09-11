@@ -27,3 +27,5 @@ Open and run `jax_example.ipynb` to verify your accelerator device:
 - On CPU pods: `Device Kind: cpu`
 - On GPU pods: `Device Kind: gpu` (`CudaDevice`)
 - On TPU pods: `Device Kind: tpu` (`TpuDevice`)
+
+

@@ -11,6 +11,139 @@ spec:
     logo:
       url: "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg"
 
+  filterRules:
+    # --------------------------------------------------------------------------
+    # IMAGE_CONFIG scope: Filter images based on selected PodConfig accelerator
+    # --------------------------------------------------------------------------
+    # When a CPU pod is selected, hide GPU and TPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image requires an accelerator (GPU or TPU) pod, but a CPU pod was selected."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: cpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["cpu"]
+
+    # When a GPU pod is selected, hide non-GPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image is not built for CUDA GPUs; please select a GPU-enabled image."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: gpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["gpu"]
+
+    # When a TPU pod is selected, hide non-TPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image is not built for TPUs (missing libtpu); please select a TPU-enabled image."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: tpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["tpu"]
+
+    # --------------------------------------------------------------------------
+    # POD_CONFIG scope: Filter podConfigs based on selected ImageConfig accelerator
+    # --------------------------------------------------------------------------
+    # When a CPU image is selected, hide GPU and TPU pod configs
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A CPU image cannot be scheduled on an accelerator (GPU or TPU) pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: cpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["cpu"]
+
+    # When a GPU image is selected, hide non-GPU pod configs
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A GPU image requires a GPU pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: gpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["gpu"]
+
+    # When a TPU image is selected, hide non-TPU pod configs
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A TPU image requires a TPU pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: tpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["tpu"]
+
   podTemplate:
     podMetadata:
       labels: {}
@@ -24,7 +157,11 @@ spec:
         httpProxy:
           removePathPrefix: true
           requestHeaders: {}
-    extraEnv: []
+    extraEnv:
+      - name: "LD_LIBRARY_PATH"
+        value: "/usr/local/nvidia/lib64"
+      - name: "PATH"
+        value: "/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     extraVolumeMounts:
       - name: "dshm"
         mountPath: "/dev/shm"
@@ -47,19 +184,49 @@ spec:
     options:
       imageConfig:
         spawner:
-          default: "codeserver-python-gemini"
+          default: "codeserver-python-cpu"
         values:
-          - id: "codeserver-python-gemini"
+          - id: "codeserver-python-cpu"
             spawner:
-              displayName: "codeserver-python (Gemini Code Assist)"
-              description: "code-server with Conda Python, numpy, pandas, and Gemini Code Assist"
+              displayName: "codeserver-python (CPU)"
+              description: "code-server with Conda Python"
               labels:
                 - key: "python_version"
                   value: "3.12"
-                - key: "geminicodeassist"
-                  value: "2.100.0"
+                - key: "accelerator"
+                  value: "cpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}-cpu"
+              imagePullPolicy: "Always"
+              ports:
+                - id: "codeserver"
+                  port: 8888
+          - id: "codeserver-python-gpu"
+            spawner:
+              displayName: "codeserver-python (GPU)"
+              description: "code-server with Conda Python, CUDA, PyTorch, and GPU JAX"
+              labels:
+                - key: "python_version"
+                  value: "3.12"
+                - key: "accelerator"
+                  value: "gpu"
+            spec:
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}-gpu"
+              imagePullPolicy: "Always"
+              ports:
+                - id: "codeserver"
+                  port: 8888
+          - id: "codeserver-python-tpu"
+            spawner:
+              displayName: "codeserver-python (TPU)"
+              description: "code-server with Conda Python, and TPU JAX (libtpu)"
+              labels:
+                - key: "python_version"
+                  value: "3.12"
+                - key: "accelerator"
+                  value: "tpu"
+            spec:
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${IMAGE_TAG}-tpu"
               imagePullPolicy: "Always"
               ports:
                 - id: "codeserver"
@@ -71,6 +238,8 @@ spec:
               labels:
                 - key: "python_version"
                   value: "3.12"
+                - key: "accelerator"
+                  value: "cpu"
             spec:
               image: "ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0"
               imagePullPolicy: "IfNotPresent"
@@ -81,25 +250,29 @@ spec:
         spawner:
           default: "small_cpu"
         values:
-          - id: "tiny_cpu"
+          - id: "medium_cpu"
             spawner:
-              displayName: "Tiny CPU"
-              description: "Pod with 0.1 CPU, 128 Mb RAM"
+              displayName: "Medium CPU"
+              description: "Pod with 2 CPU, 4 GB RAM"
               labels:
+                - key: "accelerator"
+                  value: "cpu"
                 - key: "cpu"
-                  value: "100m"
+                  value: "2"
                 - key: "memory"
-                  value: "128Mi"
+                  value: "4Gi"
             spec:
               resources:
                 requests:
-                  cpu: 100m
-                  memory: 128Mi
+                  cpu: 2
+                  memory: 4Gi
           - id: "small_cpu"
             spawner:
               displayName: "Small CPU"
               description: "Pod with 1 CPU, 2 GB RAM"
               labels:
+                - key: "accelerator"
+                  value: "cpu"
                 - key: "cpu"
                   value: "1000m"
                 - key: "memory"
@@ -109,25 +282,35 @@ spec:
                 requests:
                   cpu: 1000m
                   memory: 2Gi
-          - id: "big_gpu"
+          - id: "gpu_t4_spot"
             spawner:
-              displayName: "Big GPU"
-              description: "Pod with 4 CPU, 16 GB RAM, and 1 GPU"
+              displayName: "GPU T4 Spot"
+              description: "Pod with 1 T4 GPU"
               labels:
-                - key: "cpu"
-                  value: "4000m"
-                - key: "memory"
-                  value: "16Gi"
-                - key: "gpu"
-                  value: "1"
+                - key: "accelerator"
+                  value: "gpu"
             spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "gpu-t4-spot"
               resources:
                 requests:
-                  cpu: 4000m
-                  memory: 16Gi
+                  cpu: 2
+                  memory: 4Gi
                 limits:
                   nvidia.com/gpu: 1
-              tolerations:
-                - key: "nvidia.com/gpu"
-                  operator: "Exists"
-                  effect: "NoSchedule"
+          - id: "tpu"
+            spawner:
+              displayName: "TPU v5 2x2"
+              description: "Pod with 4 TPU v5 lite chips"
+              labels:
+                - key: "accelerator"
+                  value: "tpu"
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "tpu-v5-4-single-host"
+              resources:
+                requests:
+                  cpu: 12
+                  memory: 24Gi
+                limits:
+                  google.com/tpu: 4
