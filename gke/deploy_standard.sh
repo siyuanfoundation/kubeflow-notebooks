@@ -14,6 +14,13 @@ export USER_NAME="${USER_NAME:-user@example.com}"
 export USER_PASSWORD="${USER_PASSWORD:-12341234}"
 export USER_NAMESPACE="${USER_NAMESPACE:-kubeflow-user-example-com}"
 
+# Optional: Pre-allocated GCP Static External IP address (e.g., from 'gcloud compute addresses create')
+export STATIC_IP="${STATIC_IP:-}"
+
+# Optional: Custom domain for HTTPS (e.g., "kubeflow.example.com").
+# If unset or empty, defaults automatically to "<EXTERNAL_IP>.sslip.io" (zero DNS configuration required).
+export CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-/tmp/kubeflow-community-distribution}"
 
@@ -295,8 +302,13 @@ echo "=================================================================="
 EXPOSE_MODE="${EXPOSE_MODE:-loadbalancer}"
 
 if [ "${EXPOSE_MODE}" = "loadbalancer" ]; then
-  echo "Patching istio-ingressgateway service to type LoadBalancer..."
-  kubectl patch svc istio-ingressgateway -n istio-system -p '{"spec": {"type": "LoadBalancer"}}'
+  if [ -n "${STATIC_IP}" ]; then
+    echo "Patching istio-ingressgateway service to type LoadBalancer with static IP: ${STATIC_IP}..."
+    kubectl patch svc istio-ingressgateway -n istio-system -p "{\"spec\": {\"type\": \"LoadBalancer\", \"loadBalancerIP\": \"${STATIC_IP}\"}}"
+  else
+    echo "Patching istio-ingressgateway service to type LoadBalancer..."
+    kubectl patch svc istio-ingressgateway -n istio-system -p '{"spec": {"type": "LoadBalancer"}}'
+  fi
 
   echo "Waiting for external LoadBalancer IP to be provisioned..."
   EXTERNAL_IP=""
@@ -309,8 +321,66 @@ if [ "${EXPOSE_MODE}" = "loadbalancer" ]; then
   done
 
   if [ -n "${EXTERNAL_IP}" ]; then
-    SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"
-    echo "Configuring HTTPS (Let's Encrypt TLS certificate via cert-manager) for ${SSLIP_DOMAIN}..."
+    if [ -n "${CUSTOM_DOMAIN}" ]; then
+      DOMAIN="${CUSTOM_DOMAIN}"
+      echo "Using custom domain: ${DOMAIN}"
+      echo "Checking DNS resolution for ${DOMAIN} (expecting ${EXTERNAL_IP})..."
+
+      DNS_RESOLVED=false
+      RESOLVED_IP=$(dig +short "${DOMAIN}" 2>/dev/null | tail -n1 || true)
+      if [ -z "${RESOLVED_IP}" ]; then
+        RESOLVED_IP=$(python3 -c "import socket; print(socket.gethostbyname('${DOMAIN}'))" 2>/dev/null || true)
+      fi
+
+      if [ "${RESOLVED_IP}" = "${EXTERNAL_IP}" ]; then
+        echo "✅ DNS verified: ${DOMAIN} -> ${EXTERNAL_IP}"
+        DNS_RESOLVED=true
+      else
+        echo ""
+        echo "=================================================================="
+        echo "ACTION REQUIRED: Configure DNS for ${DOMAIN}"
+        echo "=================================================================="
+        echo "GKE LoadBalancer External IP: ${EXTERNAL_IP}"
+        echo "Current DNS resolution:       ${RESOLVED_IP:-<not resolved>}"
+        echo ""
+        echo "Please add a DNS A record in your DNS provider:"
+        echo "  ${DOMAIN}  -->  ${EXTERNAL_IP}"
+        echo ""
+        echo "Waiting up to 120 seconds for DNS propagation to ${EXTERNAL_IP}..."
+        echo "(Configure your DNS record now, or wait to fallback to sslip.io)"
+        echo "=================================================================="
+
+        for attempt in {1..24}; do
+          sleep 5
+          RESOLVED_IP=$(dig +short "${DOMAIN}" 2>/dev/null | tail -n1 || true)
+          if [ -z "${RESOLVED_IP}" ]; then
+            RESOLVED_IP=$(python3 -c "import socket; print(socket.gethostbyname('${DOMAIN}'))" 2>/dev/null || true)
+          fi
+          if [ "${RESOLVED_IP}" = "${EXTERNAL_IP}" ]; then
+            echo "✅ DNS verified: ${DOMAIN} -> ${EXTERNAL_IP}"
+            DNS_RESOLVED=true
+            break
+          fi
+          echo "  Waiting for DNS... (attempt ${attempt}/24: resolved to '${RESOLVED_IP:-none}')"
+        done
+      fi
+
+      if [ "${DNS_RESOLVED}" != "true" ]; then
+        echo ""
+        echo "⚠️  WARNING: ${DOMAIN} does not yet resolve to ${EXTERNAL_IP}."
+        echo "Falling back to ${EXTERNAL_IP}.sslip.io so your cluster has working HTTPS immediately."
+        echo "Once your DNS A record propagates, switch to your domain anytime by rerunning:"
+        echo "  export CUSTOM_DOMAIN=\"${CUSTOM_DOMAIN}\""
+        echo "  ./deploy_standard.sh"
+        echo ""
+        DOMAIN="${EXTERNAL_IP}.sslip.io"
+      fi
+    else
+      DOMAIN="${EXTERNAL_IP}.sslip.io"
+      echo "No CUSTOM_DOMAIN specified. Using automatic sslip.io domain: ${DOMAIN}"
+    fi
+
+    echo "Configuring HTTPS (Let's Encrypt TLS certificate via cert-manager) for ${DOMAIN}..."
 
     # 1. Create Istio IngressClass and allow /.well-known/acme-challenge/* in Istio AuthorizationPolicies
     kubectl apply -f - <<EOF
@@ -397,10 +467,10 @@ spec:
     name: letsencrypt-prod
     kind: ClusterIssuer
   dnsNames:
-  - ${SSLIP_DOMAIN}
+  - ${DOMAIN}
 EOF
 
-    echo "Waiting for Let's Encrypt certificate to be issued for ${SSLIP_DOMAIN} (up to 90s)..."
+    echo "Waiting for Let's Encrypt certificate to be issued for ${DOMAIN} (up to 90s)..."
     if ! kubectl wait --for=condition=Ready certificate/kubeflow-ingressgateway-certs -n istio-system --timeout=90s; then
       echo "WARNING: Let's Encrypt issuance timed out; falling back to kubeflow-self-signing-issuer..."
       kubectl apply -f - <<EOF
@@ -417,7 +487,7 @@ spec:
   ipAddresses:
   - ${EXTERNAL_IP}
   dnsNames:
-  - ${SSLIP_DOMAIN}
+  - ${DOMAIN}
 EOF
       kubectl wait --for=condition=Ready certificate/kubeflow-ingressgateway-certs -n istio-system --timeout=60s || true
     fi
@@ -454,7 +524,13 @@ EOF
     echo "Kubeflow Central Dashboard is exposed via Public LoadBalancer!"
     echo ""
     echo "Option B1 (Recommended — Trusted HTTPS for VS Code / code-server):"
-    echo "  https://${SSLIP_DOMAIN}/"
+    echo "  https://${DOMAIN}/"
+    if [ -n "${CUSTOM_DOMAIN}" ]; then
+      echo "  (Custom Domain: ${CUSTOM_DOMAIN})"
+      echo "  (sslip.io alternative: https://${EXTERNAL_IP}.sslip.io/)"
+    else
+      echo "  (sslip.io Domain — zero DNS setup required)"
+    fi
     echo ""
     echo "Option B2 (HTTP via LoadBalancer IP):"
     echo "  http://${EXTERNAL_IP}/"

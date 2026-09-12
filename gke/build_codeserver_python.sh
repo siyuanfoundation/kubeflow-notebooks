@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTEXT_DIR="${SCRIPT_DIR}/codeserver-python"
+MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
 
 # ==============================================================================
 # 1. Default Configuration & Environment Variables
@@ -50,7 +51,7 @@ Options:
   --full                     Full build from upstream codeserver:v1.11.0 (installs Conda/Python from scratch, CPU only)
   --cloud-build              Use Google Cloud Build (gcloud builds submit) instead of local Docker
   --no-push                  Build locally only; do not push to Artifact Registry
-  --register-workspacekind   Apply/update the 'codeserver' WorkspaceKind in the current Kubernetes cluster
+  --register-workspacekind   Apply/update the 'codeserver' WorkspaceKind and GKE ComputeClasses in the current Kubernetes cluster
   -h, --help                 Show this help message
 EOF
 }
@@ -238,7 +239,7 @@ done
 echo "=================================================================="
 
 # ==============================================================================
-# 4. Register / Update WorkspaceKind in Kubernetes Cluster (Optional)
+# 4. Register / Update WorkspaceKind & ComputeClasses in Kubernetes Cluster (Optional)
 # ==============================================================================
 if [[ "${REGISTER_WSK}" == "true" ]]; then
   echo "=================================================================="
@@ -246,10 +247,21 @@ if [[ "${REGISTER_WSK}" == "true" ]]; then
   echo "=================================================================="
   envsubst < "${CONTEXT_DIR}/workspacekind.yaml" | kubectl apply -f -
   echo "WorkspaceKind 'codeserver' applied successfully."
+
+  if [[ -d "${MANIFESTS_DIR}" ]]; then
+    echo "=================================================================="
+    echo "Applying GKE ComputeClass manifests (GPU and TPU)..."
+    echo "=================================================================="
+    kubectl apply -f "${MANIFESTS_DIR}/"
+    echo "ComputeClass manifests applied successfully."
+  fi
 else
   echo ""
-  echo "To register or update this image in Kubeflow Workspaces (Notebooks v2) on your GKE cluster, run:"
+  echo "To register or update this image and ComputeClasses in Kubeflow Workspaces (Notebooks v2) on your GKE cluster, run:"
   echo "  PROJECT_ID=${PROJECT_ID} REGION=${REGION} REPO_NAME=${REPO_NAME} IMAGE_NAME=${IMAGE_NAME} IMAGE_TAG=${IMAGE_TAG} \\"
   echo "    envsubst < ${CONTEXT_DIR}/workspacekind.yaml | kubectl apply -f -"
+  if [[ -d "${MANIFESTS_DIR}" ]]; then
+    echo "  kubectl apply -f ${MANIFESTS_DIR}/"
+  fi
   echo "Or re-run this script with --register-workspacekind"
 fi

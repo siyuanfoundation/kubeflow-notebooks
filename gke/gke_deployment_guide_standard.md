@@ -62,6 +62,11 @@ export ADMIN_NAMESPACE="kubeflow-admin-example-com"
 export USER_NAME="user@example.com"
 export USER_PASSWORD="12341234"
 export USER_NAMESPACE="kubeflow-user-example-com"
+
+# 3. (Optional) Custom Domain & Pre-allocated Static IP for HTTPS
+# If unset or empty, deploy_standard.sh automatically provisions a certificate using <EXTERNAL_IP>.sslip.io (free, zero DNS setup)
+export CUSTOM_DOMAIN=""  # e.g., "kubeflow.example.com"
+export STATIC_IP=""       # e.g., "34.53.68.77" (optional pre-allocated GCP regional static external IP)
 ```
 *(You can customize these emails, passwords, and namespace names; all subsequent steps reference these environment variables.)*
 
@@ -425,7 +430,7 @@ Because standard users only need namespaced permissions in their own `Profile` n
 > - **Clipboard API (`navigator.clipboard`)**: Copy/paste shortcuts and agent clipboard actions fail.
 > - **WebCrypto API (`window.crypto.subtle`)**: Used for extension state signing.
 >
-> To avoid the warning `"code-server is being accessed in an insecure context..."` and ensure coding agents work properly, use **Option A (`http://localhost:8085/`)** or **Option B1 (`https://<EXTERNAL-IP>.sslip.io/`)**.
+> To avoid the warning `"code-server is being accessed in an insecure context..."` and ensure coding agents work properly, use **Option A (`http://localhost:8085/`)** or **Option B1 (`https://<DOMAIN>/`)**.
 
 ---
 
@@ -442,56 +447,119 @@ http://localhost:8085/
 
 ---
 
-### Option B1: Public GKE LoadBalancer with Trusted Let's Encrypt HTTPS (`https://<EXTERNAL-IP>.sslip.io/`)
+### Option B1: Public GKE LoadBalancer with Trusted Let's Encrypt HTTPS
 
-`deploy_standard.sh` automatically provisions a **free, publicly trusted Let's Encrypt HTTPS certificate** for your GKE LoadBalancer IP using `<EXTERNAL-IP>.sslip.io`.
+`deploy_standard.sh` automatically provisions a **free, publicly trusted Let's Encrypt HTTPS certificate** for your GKE LoadBalancer using either:
+- **Case 1: No Custom Domain (Default / Quickstart)** — Automatically uses `<EXTERNAL-IP>.sslip.io` (zero DNS setup required).
+- **Case 2: Custom Domain (e.g., `kubeflow.example.com`)** — Uses your registered domain name after configuring a DNS A record.
 
-Get your external HTTPS URL:
+---
+
+#### What To Do If You Have Your Own Custom Domain
+
+Because a DNS A record must point to an IPv4 address, you have two workflows depending on whether you let GKE dynamically assign an external IP or pre-allocate a static IP:
+
+##### Approach 1: Dynamic IP (Deploy First -> Add DNS -> Rerun or In-Script Wait)
+This is the standard approach when you don't have a pre-allocated IP address:
+1. **Get the LoadBalancer IP**:
+   Run `deploy_standard.sh` without setting `CUSTOM_DOMAIN` (or run through Step 2). GKE allocates an ephemeral external IP and provides an immediate working `sslip.io` HTTPS domain:
+   ```bash
+   EXTERNAL_IP=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+   echo "LoadBalancer External IP: ${EXTERNAL_IP}"
+   ```
+2. **Add an A Record in Your DNS Provider**:
+   In your domain registrar / DNS provider (Cloud DNS, Route 53, Cloudflare, GoDaddy, etc.):
+   - **Type**: `A`
+   - **Host / Name**: Subdomain (e.g. `kubeflow` for `kubeflow.example.com`) or `@` (for root apex `example.com`)
+   - **Value / Destination**: `<EXTERNAL-IP>` (e.g., `34.53.68.77`)
+   - **TTL**: `300` seconds (or lowest supported for quick propagation)
+
+   > [!TIP]
+   > **Cloudflare Users**: Ensure proxy status is set to **"DNS only"** (grey cloud), not "Proxied" (orange cloud), so Let's Encrypt's ACME HTTP-01 challenge can reach your cluster directly.
+
+3. **Verify DNS Propagation & Switch Certificate**:
+   ```bash
+   dig +short kubeflow.example.com
+   ```
+   Once it resolves to `${EXTERNAL_IP}`, switch the certificate by rerunning `deploy_standard.sh`:
+   ```bash
+   export CUSTOM_DOMAIN="kubeflow.example.com"
+   ./deploy_standard.sh
+   ```
+   *(Because `deploy_standard.sh` is completely idempotent, this re-run takes only ~15 seconds to issue the new Let's Encrypt certificate and update the Gateway).*
+
+   > [!NOTE]
+   > **In-Script Wait**: If you run with `export CUSTOM_DOMAIN="kubeflow.example.com"` on the very first run, `deploy_standard.sh` will display the provisioned LoadBalancer IP and automatically pause/poll for up to 120 seconds for you to create the DNS A record, proceeding without needing a rerun as soon as DNS resolves.
+
+---
+
+##### Approach 2: Pre-allocated GCP Static IP (Single Pass, No Rerun)
+If you want to configure DNS *before* deploying:
+1. **Reserve a Static External IP in GCP**:
+   ```bash
+   gcloud compute addresses create kubeflow-ip --region=$REGION --project=$PROJECT_ID
+   STATIC_IP=$(gcloud compute addresses describe kubeflow-ip --region=$REGION --project=$PROJECT_ID --format='value(address)')
+   echo "Reserved Static IP: ${STATIC_IP}"
+   ```
+2. **Add the DNS A Record Ahead of Time**:
+   Create the A record in your DNS provider pointing your domain (e.g., `kubeflow.example.com`) to `${STATIC_IP}`.
+3. **Deploy in a Single Pass**:
+   ```bash
+   export STATIC_IP="${STATIC_IP}"
+   export CUSTOM_DOMAIN="kubeflow.example.com"
+   ./deploy_standard.sh
+   ```
+   `deploy_standard.sh` binds `istio-ingressgateway` to that static IP, DNS is already live, and the Let's Encrypt certificate is issued immediately on the first pass.
+
+---
+
+#### What To Do If You Do Not Have a Domain (Default: `sslip.io`)
+
+If you don't have a domain name or want an instant, zero-DNS setup, leave `CUSTOM_DOMAIN` unset:
 ```bash
 EXTERNAL_IP=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 echo "https://${EXTERNAL_IP}.sslip.io/"
 ```
-Open in your browser:
-```
-https://<EXTERNAL-IP>.sslip.io/
-```
+The script or manual commands will automatically use `<EXTERNAL-IP>.sslip.io`.
 
-#### How `SSLIP_DOMAIN`, `IngressClass`, and `cert-manager` Work Together (Beginner's Guide)
+---
 
-If you are new to Kubernetes networking, DNS, and TLS certificates, here is how `deploy_standard.sh` gets a browser-trusted HTTPS certificate without requiring you to buy a domain name or configure DNS:
+#### How `DOMAIN`, `IngressClass`, and `cert-manager` Work Together (Beginner's Guide)
+
+If you are new to Kubernetes networking, DNS, and TLS certificates, here is how a browser-trusted HTTPS certificate is provisioned:
 
 ```mermaid
 sequenceDiagram
     participant User as User Browser
-    participant DNS as sslip.io DNS
+    participant DNS as DNS Server<br/>(sslip.io or Custom DNS)
     participant LE as Let's Encrypt CA
     participant IGW as Istio IngressGateway<br/>(GKE LoadBalancer IP)
     participant CM as cert-manager<br/>(ACME Solver Pod)
 
-    Note over IGW,CM: 1. cert-manager requests cert for <IP>.sslip.io
-    CM->>LE: Request TLS Certificate for 34.53.68.77.sslip.io
-    LE->>DNS: Resolve 34.53.68.77.sslip.io
-    DNS-->>LE: Returns 34.53.68.77
+    Note over IGW,CM: 1. cert-manager requests cert for <DOMAIN>
+    CM->>LE: Request TLS Certificate for <DOMAIN>
+    LE->>DNS: Resolve <DOMAIN>
+    DNS-->>LE: Returns <EXTERNAL-IP>
     LE->>IGW: HTTP GET /.well-known/acme-challenge/<TOKEN>
     Note over IGW: AuthorizationPolicy exempts path from Dex login<br/>IngressClass/istio routes request to solver pod
     IGW->>CM: Forward challenge request to solver pod
     CM-->>LE: Return HTTP 200 (<TOKEN> verified)
     LE-->>CM: Issue signed TLS Certificate
     Note over IGW,CM: 2. cert-manager saves Secret 'kubeflow-ingressgateway-certs'<br/>kubeflow-gateway loads TLS cert on port 443
-    User->>IGW: HTTPS GET https://34.53.68.77.sslip.io/
+    User->>IGW: HTTPS GET https://<DOMAIN>/
     IGW-->>User: Trusted HTTPS Response (Secure Context = true)
 ```
 
-1. **Why `SSLIP_DOMAIN` (`<EXTERNAL-IP>.sslip.io`)?**
-   - Public Certificate Authorities like **Let's Encrypt** refuse to issue trusted HTTPS certificates for bare IP addresses (e.g., `34.53.68.77`); they only issue certificates for **domain names**.
-   - Buying a custom domain name and configuring DNS records takes time and money.
-   - **[sslip.io](https://sslip.io/)** is a free, public "magic" DNS service: whenever any computer on the internet queries `<IP>.sslip.io` (for example, `34.53.68.77.sslip.io`), `sslip.io`'s DNS servers automatically extract the IP from the hostname and reply with `34.53.68.77`.
-   - This gives your GKE LoadBalancer IP an instant, valid domain name (`SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"`) with zero DNS setup.
+1. **Why a Domain Name is Required (`sslip.io` vs. Custom Domain)**:
+   - Public Certificate Authorities like **Let's Encrypt** refuse to issue trusted certificates for bare IP addresses (e.g. `34.53.68.77`); they only issue certificates for valid **domain names**.
+   - **If you do not have a domain**: **[sslip.io](https://sslip.io/)** is a free public "magic" DNS service where `<IP>.sslip.io` (e.g. `34.53.68.77.sslip.io`) automatically resolves to `34.53.68.77` with zero configuration.
+   - **If you have a custom domain**: Your DNS provider resolves your custom hostname (e.g. `kubeflow.example.com`) to `34.53.68.77` via an A record.
+   - Once DNS resolves to the LoadBalancer IP, the entire Kubernetes ACME workflow is **100% identical**!
 
 2. **How Let's Encrypt Verifies Ownership (`ACME HTTP-01 Challenge`)**:
-   - When `cert-manager` asks Let's Encrypt for a certificate for `34.53.68.77.sslip.io`, Let's Encrypt must verify that you actually control the server at `34.53.68.77`.
+   - When `cert-manager` asks Let's Encrypt for a certificate for `${DOMAIN}`, Let's Encrypt must verify that you actually control the server pointed to by `${DOMAIN}`.
    - Let's Encrypt gives `cert-manager` a random token and makes an HTTP request from the public internet to:
-     `http://34.53.68.77.sslip.io/.well-known/acme-challenge/<TOKEN>`
+     `http://${DOMAIN}/.well-known/acme-challenge/<TOKEN>`
    - To answer that request, `cert-manager` creates a temporary pod (`cm-acme-http-solver-*`) inside your cluster that serves the expected token.
 
 3. **Why `IngressClass/istio` is Required**:
@@ -514,7 +582,13 @@ If you want to inspect or apply the HTTPS configuration manually on an existing 
 
 ```bash
 EXTERNAL_IP=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-SSLIP_DOMAIN="${EXTERNAL_IP}.sslip.io"
+
+# Choose your domain:
+# Case 1: Custom domain (ensure your DNS A record points to $EXTERNAL_IP first)
+# DOMAIN="kubeflow.example.com"
+# Case 2: Auto sslip.io domain (zero DNS setup)
+DOMAIN="${CUSTOM_DOMAIN:-${EXTERNAL_IP}.sslip.io}"
+echo "Configuring HTTPS for domain: ${DOMAIN}"
 
 # 1. Register IngressClass 'istio' & exempt ACME challenge paths from OAuth2 login
 kubectl apply -f - <<EOF
@@ -574,7 +648,7 @@ spec:
       app: istio-ingressgateway
 EOF
 
-# 2. Create Let's Encrypt ClusterIssuer & Certificate for <EXTERNAL-IP>.sslip.io
+# 2. Create Let's Encrypt ClusterIssuer & Certificate for ${DOMAIN}
 kubectl apply -f - <<EOF
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -601,7 +675,7 @@ spec:
     name: letsencrypt-prod
     kind: ClusterIssuer
   dnsNames:
-  - ${SSLIP_DOMAIN}
+  - ${DOMAIN}
 EOF
 
 # 3. Wait for Let's Encrypt certificate to become Ready (~15-30 seconds)
