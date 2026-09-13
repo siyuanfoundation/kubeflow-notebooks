@@ -429,6 +429,54 @@ Do not confuse the UI's current `kubeflow-user` placeholder with the verified
 identity. The backend's workspace audit record carries the Google email. Known
 UI and activity/culling gaps are listed in the codelab acceptance record.
 
+## Enroll additional users
+
+Admission and authorization are separate layers by design: the IAP binding only
+admits an identity to the application, and Kubernetes RBAC decides what it may
+do. Keep the IAP layer coarse so it is configured once, and enroll users
+day-to-day in RBAC only.
+
+Bind IAP to a Google Group instead of individual users, then enrollment on the
+Google side becomes group membership managed outside IAM:
+
+```sh
+export USERS_GROUP=notebooks-users@YOUR_DOMAIN
+gcloud iap web add-iam-policy-binding --project="$PROJECT" \
+  --resource-type=backend-services --service="$BACKEND_SERVICE" \
+  --member="group:$USERS_GROUP" --role=roles/iap.httpsResourceAccessor --condition=None
+```
+
+The group must exist in your organization before binding. After verifying group
+members can sign in, remove any earlier per-user bindings so the group is the
+single admission list.
+
+Per user, add a `User` subject to the tenant RoleBinding and the discovery
+ClusterRoleBinding:
+
+```sh
+export NEW_USER=someone@YOUR_DOMAIN
+kubectl --context="$CONTEXT" -n team-a patch rolebinding notebooks-gke-pilot --type=json \
+  -p '[{"op":"add","path":"/subjects/-","value":{"kind":"User","apiGroup":"rbac.authorization.k8s.io","name":"'"$NEW_USER"'"}}]'
+kubectl --context="$CONTEXT" patch clusterrolebinding notebooks-gke-pilot-discovery --type=json \
+  -p '[{"op":"add","path":"/subjects/-","value":{"kind":"User","apiGroup":"rbac.authorization.k8s.io","name":"'"$NEW_USER"'"}}]'
+```
+
+Know what you are granting:
+
+- Users sharing a tenant namespace can reach **each other's** workspaces: the
+  workspace check is namespace-scoped RBAC, not per-owner. Separate tenants need
+  their own namespace, bindings, quota, and an admission-policy update.
+- The tenant ResourceQuota is shared; two users will feel the pilot's limits.
+- Do not use `Group` subjects in RoleBindings yet: the access proxy's
+  `SubjectAccessReview` carries only the verified email, so group-based RBAC
+  does not take effect through the proxy even where GKE Google Groups for RBAC
+  is enabled. Group-aware authorization is recorded as future work in
+  [DESIGN.md](DESIGN.md#future-work).
+- Revocation is the mirror image and must cover **both layers plus desktop
+  grants**: remove the RoleBinding subject, remove the group/IAM member, and
+  revoke the user's desktop connections — removing IAP admission alone does not
+  invalidate previously issued desktop tokens.
+
 ## VS Code Jupyter extension
 
 The optional desktop endpoint accepts standard Jupyter connection tokens. It uses
