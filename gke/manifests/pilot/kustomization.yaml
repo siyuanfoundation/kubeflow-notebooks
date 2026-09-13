@@ -1,0 +1,72 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml
+  - admission.yaml
+  - access.yaml
+patches:
+  - target:
+      group: kubeflow.org
+      version: v1beta1
+      kind: WorkspaceKind
+      name: jupyterlab
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: gke-jupyterlab
+      - op: remove
+        path: /spec/podTemplate/podMetadata
+      - op: replace
+        path: /spec/podTemplate/serviceAccount
+        value:
+          name: gke-notebook
+      - op: add
+        path: /spec/podTemplate/securityContext/seccompProfile
+        value:
+          type: RuntimeDefault
+      - op: replace
+        path: /spec/podTemplate/probes
+        value:
+          startupProbe:
+            tcpSocket:
+              port: 8888
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            periodSeconds: 5
+      - op: replace
+        path: /spec/podTemplate/options/imageConfig
+        value:
+          spawner:
+            default: jupyter-scipy:v1.10.0
+          values:
+            - id: jupyter-scipy:v1.10.0
+              spawner:
+                displayName: JupyterLab SciPy
+                description: Kubeflow JupyterLab SciPy v1.10.0
+              spec:
+                image: ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy@sha256:5c64bc8a4298bcb89b522e16903f49965a287a99cfdeededa426cc266c04cdaf
+                imagePullPolicy: IfNotPresent
+                ports:
+                  - id: jupyterlab
+                    port: 8888
+      - op: replace
+        path: /spec/podTemplate/options/podConfig
+        value:
+          spawner:
+            default: pilot_cpu
+          values:
+            - id: pilot_cpu
+              spawner:
+                displayName: Pilot CPU
+                description: 0.5 CPU and 1 GiB memory, limited to 1 CPU and 2 GiB
+              spec:
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 1Gi
+                  limits:
+                    cpu: "1"
+                    memory: 2Gi
