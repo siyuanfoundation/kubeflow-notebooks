@@ -141,7 +141,17 @@ land without forking upstream:
   pod configuration, validated by this integration's tests instead of hand-built
   pod specs. The first milestone stays secure access, not accelerators, so this
   follows the security gates.
-- **Production and multi-tenant gates.** Enrollment and tenant provisioning,
+- **One-touch enrollment on Google Groups.** Enrollment today touches two
+  layers: an IAP member and a RoleBinding subject. Both layers already accept
+  groups — IAP natively, and RoleBindings through GKE's Google Groups for RBAC —
+  so the end state is a single group membership covering admission and
+  authorization. The missing piece is the proxy: group resolution happens at
+  authentication time, not in the RBAC authorizer, so a `SubjectAccessReview`
+  carrying only the email never matches a `Group` subject. The proxy must
+  resolve transitive membership (Cloud Identity `checkTransitiveMembership`),
+  cached and fail-closed, and pass groups in the review. Existing GKE features
+  over invented enrollment machinery.
+- **Production and multi-tenant gates.** Tenant provisioning,
   activity/culling verification, upgrade and cleanup automation, desktop token
   renewal ergonomics, and removal of the temporary namespace-filter adapter once
   upstream ships equivalent filtering
