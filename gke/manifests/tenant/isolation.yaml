@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gke-tenant-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubeflow-workspaces
+          podSelector:
+            matchLabels:
+              app: gke-access-proxy
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kubeflow-workspaces
+          podSelector:
+            matchLabels:
+              app: workspaces-controller

@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gke-notebook
+  namespace: team-a
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+rules:
+  - apiGroups: [kubeflow.org]
+    resources: [workspaces]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+subjects:
+  - kind: User
+    name: aojea@google.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: notebooks-gke-pilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: notebooks-gke-pilot-discovery
+rules:
+  - apiGroups: [kubeflow.org]
+    resources: [workspacekinds]
+    verbs: [get, list]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: notebooks-gke-pilot-discovery
+subjects:
+  - kind: User
+    name: aojea@google.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: notebooks-gke-pilot-discovery
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+spec:
+  hard:
+    count/workspaces.kubeflow.org: "3"
+    pods: "3"
+    persistentvolumeclaims: "4"
+    requests.storage: 40Gi
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.cpu: "4"
+    limits.memory: 8Gi
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: notebooks-gke-rwo
+  labels:
+    notebooks.kubeflow.org/can-use: "true"
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
