@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTEXT_DIR="${SCRIPT_DIR}/codeserver-python"
+EXAMPLES_DIR="${SCRIPT_DIR}/examples"
 MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
 
 # ==============================================================================
@@ -197,11 +198,12 @@ for v in "${VARIANTS[@]}"; do
   echo "Dockerfile: ${CONTEXT_DIR}/${V_DOCKERFILE}"
   echo "=================================================================="
 
-  if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
-    TMP_BUILD_DIR="$(mktemp -d)"
-    cp -r "${CONTEXT_DIR}/." "${TMP_BUILD_DIR}/"
-    cp "${CONTEXT_DIR}/${V_DOCKERFILE}" "${TMP_BUILD_DIR}/Dockerfile"
+  TMP_BUILD_DIR="$(mktemp -d)"
+  cp -r "${CONTEXT_DIR}/." "${TMP_BUILD_DIR}/"
+  cp -r "${EXAMPLES_DIR}" "${TMP_BUILD_DIR}/examples"
+  cp "${CONTEXT_DIR}/${V_DOCKERFILE}" "${TMP_BUILD_DIR}/Dockerfile"
 
+  if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
     gcloud builds submit "${TMP_BUILD_DIR}" \
       --tag="${V_IMAGE_URI}" \
       --project="${PROJECT_ID}"
@@ -209,9 +211,10 @@ for v in "${VARIANTS[@]}"; do
   else
     docker build \
       --platform linux/amd64 \
-      -f "${CONTEXT_DIR}/${V_DOCKERFILE}" \
+      -f "${TMP_BUILD_DIR}/Dockerfile" \
       -t "${V_IMAGE_URI}" \
-      "${CONTEXT_DIR}"
+      "${TMP_BUILD_DIR}"
+    rm -rf "${TMP_BUILD_DIR}"
 
     if [[ "${PUSH_IMAGE}" == "true" ]]; then
       echo "Pushing ${V_IMAGE_URI}..."

@@ -82,6 +82,7 @@ RUN code-server --install-extension "ms-python.python@${CODESERVER_PYTHON_VERSIO
 
 # home - pre-populate home with files for this image
 COPY --chown=${NB_USER}:${NB_GID} home/. ${HOME}/
+COPY --chown=${NB_USER}:${NB_GID} examples/. ${HOME}/
 
 # s6 - 01-copy-tmp-home
 # NOTE: the contents of $HOME_TMP are copied to $HOME at runtime

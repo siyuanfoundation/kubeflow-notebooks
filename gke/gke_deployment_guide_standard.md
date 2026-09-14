@@ -35,7 +35,7 @@ gcloud container node-pools create e2-standard-4-pool \
     --location=$REGION \
     --enable-autoscaling \
     --min-nodes=0 \
-    --max-nodes=1  `# 1 per zone`
+    --max-nodes=3  `# 3 per zone`
 ```
 
 ### Cluster Connection
