@@ -543,6 +543,15 @@ password, Google OAuth client secret, `gcloud`, or Kubernetes credential is need
 by the notebook user. If a password prompt appears, cancel it and check that you
 used the generated desktop URL, not the IAP-protected browser hostname.
 
+On macOS, if VS Code fails with `unable to get issuer certificate` for a valid
+Google Certificate Manager certificate, set `"http.systemCertificatesNode": true`
+in VS Code user settings (`settings.json`) and reload the window. This avoids
+VS Code's legacy Keychain certificate loader (`/usr/bin/security find-certificate`)
+injecting the cross-signed `GTS Root R1` intermediate (`Issuer: GlobalSign Root CA`)
+from `/Library/Keychains/System.keychain` without `GlobalSign Root CA`, which
+causes OpenSSL's certificate store to shadow the built-in self-signed `GTS Root R1`
+root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TLS.
+
 ### Configure connection lifetimes
 
 Administrators set these integer values in the deployment JSON:
@@ -706,6 +715,7 @@ and [Kubernetes ServiceAccount tokens](https://kubernetes.io/docs/reference/acce
 | Notebook remains Pending | Node resources, image pull permissions, PVC provisioning, quota, Pod Security, and events |
 | Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update |
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated |
+| VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification |
 
 Inspect conditions and error messages without printing Secrets, access tokens,
 OAuth state values, or cookies. Keep notebook data when investigating failures.
