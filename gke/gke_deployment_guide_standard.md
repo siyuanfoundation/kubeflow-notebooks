@@ -63,10 +63,13 @@ export USER_NAME="user@example.com"
 export USER_PASSWORD="12341234"
 export USER_NAMESPACE="kubeflow-user-example-com"
 
+export GCS_BUCKET=""  # your gcs bucket to store data, shared across the user namespace
+
 # 3. (Optional) Custom Domain & Pre-allocated Static IP for HTTPS
 # If unset or empty, deploy_standard.sh automatically provisions a certificate using <EXTERNAL_IP>.sslip.io (free, zero DNS setup)
 export CUSTOM_DOMAIN=""  # e.g., "kubeflow.example.com"
 export STATIC_IP=""       # e.g., "34.53.68.77" (optional pre-allocated GCP regional static external IP)
+
 ```
 *(You can customize these emails, passwords, and namespace names; all subsequent steps reference these environment variables.)*
 
@@ -229,6 +232,20 @@ kubectl wait --for=condition=Established crd/clustertrainingruntimes.trainer.kub
 kubectl apply -k applications/trainer/overlays --server-side --force-conflicts
 ```
 *(On GKE Standard, the upstream RBAC bindings to `system:authenticated` succeed without restriction.)*
+
+---
+
+### Step 6b: Deploy Kubeflow Spark Operator (Optional)
+To run distributed Apache Spark jobs (such as Stage 1 of `examples/distributed_tpu_example.ipynb`) using the Kubeflow Spark SDK (`kubeflow.spark.SparkClient`), deploy the Kubeflow Spark Operator:
+```bash
+kubectl apply -k applications/spark/spark-operator/overlays/kubeflow --server-side --force-conflicts
+kubectl wait --for=condition=Established crd/sparkapplications.sparkoperator.k8s.io --timeout=60s
+kubectl wait --for=condition=Established crd/scheduledsparkapplications.sparkoperator.k8s.io --timeout=60s
+kubectl wait --for=condition=Established crd/sparkconnects.sparkoperator.k8s.io --timeout=60s
+kubectl rollout status deployment/spark-operator-controller -n kubeflow --timeout=180s
+kubectl rollout status deployment/spark-operator-webhook -n kubeflow --timeout=180s
+```
+*(Note: `deploy_standard.sh` deploys the Spark Operator by default. Set `INSTALL_SPARK_OPERATOR=false` to skip it.)*
 
 ---
 
@@ -816,7 +833,36 @@ kubectl logs -n ${USER_NAMESPACE} -l trainer.kubeflow.org/trainjob-ancestor-step
 
 ---
 
-## 7. Teardown & Cleanup
+## 7. Running End-to-End Distributed Spark + TPU Example (`distributed_tpu_example.ipynb`)
+
+The `examples/distributed_tpu_example.ipynb` notebook orchestrates a 3-stage ML workflow directly from a small CPU workspace pod:
+1. **Stage 1 (Distributed Data Processing)**: Submits an Apache Spark job (1 driver + 4 executor pods) via `kubeflow.spark.SparkClient`.
+2. **Stage 2 (Distributed TPU Training)**: Submits a multi-host Cloud TPU `TrainJob` (2 hosts × 4 TPU v5e cores = 8 cores) via `kubeflow.trainer.TrainerClient`.
+3. **Stage 3 (Model Serving)**: Deploys a 2-replica CPU inference `Deployment` and `Service` (`fashion-mnist-inference`).
+
+### Granting GCS Bucket IAM Access (Workload Identity)
+All three stages exchange dataset shards, model parameters, and metrics via a shared GCS bucket. Because GKE Workload Identity Federation is enabled on the cluster (`--workload-pool=${PROJECT_ID}.svc.id.goog`), you can grant GCS bucket access directly to your workspace namespace without managing service account keys:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+export PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format="value(projectNumber)")
+export NAMESPACE="${USER_NAMESPACE}"          # e.g. kubeflow-user-example-com or kubeflow-admin-example-com
+export BUCKET="${NAMESPACE}-bucket"           # your GCS_BUCKET name (defaults to ${NAMESPACE}-bucket)
+
+# 1. Create the GCS bucket (if it does not exist yet)
+gcloud storage buckets create gs://${BUCKET} --location=${REGION:-us-west1} --project=${PROJECT_ID}
+
+# 2. Grant roles/storage.objectUser to all pods/ServiceAccounts in the workspace namespace
+#    (covers the workspace pod ws-<name>, Spark driver/executors, TPU TrainJob, and inference service)
+gcloud storage buckets add-iam-policy-binding gs://${BUCKET} \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${NAMESPACE}" \
+  --role="roles/storage.objectUser"
+```
+*(Tip: If you export `GCS_BUCKET=<your-bucket>` before running `./deploy_standard.sh`, the script will automatically configure these IAM bindings for both `${ADMIN_NAMESPACE}` and `${USER_NAMESPACE}`.)*
+
+---
+
+## 8. Teardown & Cleanup
 
 To cleanly remove all deployed components:
 ```bash

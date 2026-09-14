@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Build and Push Custom Kubeflow Code-Server Python Image (with Gemini Code Assist)
-# Target Registry: ${REGION}-docker.pkg.dev/${PROJECT_ID}/kubeflow-repo
+# Build and Push Custom Kubeflow JupyterLab Image (TPU) & Spark Image to Google Artifact Registry
 #
-# Reference:
-#   https://github.com/kubeflow/notebooks/tree/notebooks-v1/components/example-notebook-servers/codeserver-python
+# Upstream CPU (jupyter-scipy:v1.10.0) and CUDA GPU (jupyter-pytorch-cuda-full:v1.10.0)
+# images are used directly in WorkspaceKind/jupyterlab without custom rebuilds.
+# This script builds the custom TPU variant (extending jupyter-scipy:v1.10.0 with
+# jax[tpu], libtpu, kubeflow[spark], and google-cloud-storage) and the Spark 4.0.1
+# image (Python 3.12) used by SparkConnect in distributed_tpu_example.ipynb.
 # ==============================================================================
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONTEXT_DIR="${SCRIPT_DIR}/codeserver-python"
+CONTEXT_DIR="${SCRIPT_DIR}/jupyterlab"
 EXAMPLES_DIR="${SCRIPT_DIR}/examples"
 MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
 
@@ -19,14 +22,13 @@ MANIFESTS_DIR="${SCRIPT_DIR}/manifests"
 export PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 export REGION="${REGION:-us-west1}"
 export REPO_NAME="${REPO_NAME:-kubeflow-repo}"
-export IMAGE_NAME="${IMAGE_NAME:-codeserver-python}"
+export IMAGE_NAME="${IMAGE_NAME:-jupyterlab}"
 export IMAGE_TAG="${IMAGE_TAG:-gemini}"
 export USER_NAMESPACE="${USER_NAMESPACE:-kubeflow-user-example-com}"
 export GCS_BUCKET="${GCS_BUCKET:-${USER_NAMESPACE}-bucket}"
 
 # Default configuration
 VARIANT="all"
-BUILD_MODE="fast"
 USE_CLOUD_BUILD=false
 PUSH_IMAGE=true
 REGISTER_WSK=false
@@ -35,9 +37,11 @@ show_usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Build and push custom Kubeflow VS Code (codeserver-python) images (CPU, GPU, TPU, and Spark)
-with Gemini Code Assist, numpy, pandas, and accelerator libraries to Google Artifact Registry.
-All images are tagged with both \${IMAGE_TAG} and 'latest':
+Build and push custom Kubeflow JupyterLab (CPU, GPU, TPU) and Spark images to Google Artifact Registry.
+Each JupyterLab variant extends the upstream JupyterLab image with JAX, google-cloud-storage,
+and kubeflow[spark] SDK dependencies.
+
+All built images are tagged with both \${IMAGE_TAG} and 'latest':
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-cpu  (& :latest-cpu)
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-gpu  (& :latest-gpu)
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-tpu  (& :latest-tpu)
@@ -47,19 +51,17 @@ Environment Variables:
   PROJECT_ID     Google Cloud Project ID (default: current gcloud project)
   REGION         Google Cloud Region (default: us-west1)
   REPO_NAME      Artifact Registry repository name (default: kubeflow-repo)
-  IMAGE_NAME     Docker image name (default: codeserver-python)
+  IMAGE_NAME     Docker image name (default: jupyterlab)
   IMAGE_TAG      Docker image tag prefix (default: gemini)
   USER_NAMESPACE Kubeflow user namespace (default: kubeflow-user-example-com)
   GCS_BUCKET     Shared GCS bucket for notebook pipeline (default: \${USER_NAMESPACE}-bucket)
 
 Options:
   --variant <cpu|gpu|tpu|spark|all> Build specific variant or all 4 (default: all)
-  --fast                     Fast layer build extending upstream codeserver-python:v1.11.0 (default)
-  --full                     Full build from upstream codeserver:v1.11.0 (installs Conda/Python from scratch, CPU only)
-  --cloud-build              Use Google Cloud Build (gcloud builds submit) instead of local Docker
-  --no-push                  Build locally only; do not push to Artifact Registry
-  --register-workspacekind   Apply/update the 'codeserver' WorkspaceKind and GKE ComputeClasses in the current Kubernetes cluster
-  -h, --help                 Show this help message
+  --cloud-build                     Use Google Cloud Build (gcloud builds submit) instead of local Docker
+  --no-push                         Build locally only; do not push to Artifact Registry
+  --register-workspacekind          Apply/update the 'jupyterlab' WorkspaceKind and GKE ComputeClasses in the current Kubernetes cluster
+  -h, --help                        Show this help message
 EOF
 }
 
@@ -68,14 +70,6 @@ while [[ $# -gt 0 ]]; do
     --variant)
       VARIANT="$2"
       shift 2
-      ;;
-    --fast)
-      BUILD_MODE="fast"
-      shift
-      ;;
-    --full)
-      BUILD_MODE="full"
-      shift
       ;;
     --cloud-build)
       USE_CLOUD_BUILD=true
@@ -102,8 +96,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${PROJECT_ID}" ]]; then
-  echo "ERROR: PROJECT_ID is not set and could not be determined from 'gcloud config get-value project'." >&2
-  echo "Please export PROJECT_ID=<your-gcp-project-id> and re-run." >&2
+  echo "ERROR: PROJECT_ID is not set and could not be determined from gcloud config." >&2
+  echo "Please run: export PROJECT_ID=your-gcp-project-id" >&2
   exit 1
 fi
 
@@ -121,46 +115,40 @@ case "${VARIANT}" in
 esac
 
 echo "=================================================================="
-echo "Custom Kubeflow Code-Server Python Image Builder"
-echo "=================================================================="
-echo "Project ID:       ${PROJECT_ID}"
-echo "Region:           ${REGION}"
-echo "Repository:       ${REPO_NAME}"
-echo "Image Name:       ${IMAGE_NAME}"
-echo "Image Tag Prefix: ${IMAGE_TAG}"
-echo "Variants:         ${VARIANTS[*]}"
-echo "Build Mode:       ${BUILD_MODE}"
-echo "Build Backend:    $( [[ "${USE_CLOUD_BUILD}" == "true" ]] && echo "Google Cloud Build" || echo "Local Docker" )"
+echo "Build Configuration:"
+echo "  PROJECT_ID:       ${PROJECT_ID}"
+echo "  REGION:           ${REGION}"
+echo "  REPO_NAME:        ${REPO_NAME}"
+echo "  IMAGE_NAME:       ${IMAGE_NAME}"
+echo "  IMAGE_TAG:        ${IMAGE_TAG}"
+echo "  GCS_BUCKET:       ${GCS_BUCKET}"
+echo "  Variants:         ${VARIANTS[*]}"
+echo "  Use Cloud Build:  ${USE_CLOUD_BUILD}"
+echo "  Push Image:       ${PUSH_IMAGE}"
+echo "  Register WSK:     ${REGISTER_WSK}"
 echo "=================================================================="
 
 # ==============================================================================
-# 2. Ensure Artifact Registry Repository Exists & GKE Nodes Have Pull Access
+# 2. Ensure Artifact Registry Repository Exists & Configure Docker Auth
 # ==============================================================================
-if [[ "${PUSH_IMAGE}" == "true" ]]; then
+if [[ "${PUSH_IMAGE}" == "true" || "${USE_CLOUD_BUILD}" == "true" ]]; then
   echo "Checking Artifact Registry repository '${REPO_NAME}' in ${REGION}..."
   if ! gcloud artifacts repositories describe "${REPO_NAME}" \
       --location="${REGION}" \
       --project="${PROJECT_ID}" >/dev/null 2>&1; then
-    echo "Artifact Registry repository '${REPO_NAME}' not found. Creating it..."
+    echo "Creating Artifact Registry Docker repository '${REPO_NAME}' in ${REGION}..."
     gcloud artifacts repositories create "${REPO_NAME}" \
       --repository-format=docker \
       --location="${REGION}" \
-      --description="Kubeflow custom notebook server images" \
+      --description="Kubeflow Notebook custom images" \
       --project="${PROJECT_ID}"
   else
     echo "Artifact Registry repository '${REPO_NAME}' already exists."
   fi
 
-  # Grant GKE node ServiceAccount (Compute Engine default SA) Artifact Registry Reader role
-  PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || true)"
-  if [[ -n "${PROJECT_NUMBER}" ]]; then
-    COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-    echo "Ensuring GKE node service account (${COMPUTE_SA}) has roles/artifactregistry.reader on '${REPO_NAME}'..."
-    gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
-      --location="${REGION}" \
-      --project="${PROJECT_ID}" \
-      --member="serviceAccount:${COMPUTE_SA}" \
-      --role="roles/artifactregistry.reader" >/dev/null
+  if [[ "${USE_CLOUD_BUILD}" == "false" ]]; then
+    echo "Configuring Docker authentication for ${REGION}-docker.pkg.dev..."
+    gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
   fi
 fi
 
@@ -169,34 +157,25 @@ fi
 # ==============================================================================
 BUILT_IMAGES=()
 
-if [[ "${USE_CLOUD_BUILD}" != "true" && "${PUSH_IMAGE}" == "true" ]]; then
-  echo "Configuring Docker authentication for ${REGION}-docker.pkg.dev..."
-  gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-fi
-
 for v in "${VARIANTS[@]}"; do
   case "$v" in
     cpu)
-      if [[ "${BUILD_MODE}" == "full" ]]; then
-        V_DOCKERFILE="Dockerfile"
-      else
-        V_DOCKERFILE="Dockerfile.fast"
-      fi
+      V_DOCKERFILE="Dockerfile.fast"
       V_TAG="${IMAGE_TAG}-cpu"
       V_LATEST_TAG="latest-cpu"
-      V_DESC="CPU (Standard)"
+      V_DESC="JupyterLab CPU"
       ;;
     gpu)
       V_DOCKERFILE="Dockerfile.fast.gpu"
       V_TAG="${IMAGE_TAG}-gpu"
       V_LATEST_TAG="latest-gpu"
-      V_DESC="CUDA GPU"
+      V_DESC="JupyterLab CUDA GPU"
       ;;
     tpu)
       V_DOCKERFILE="Dockerfile.fast.tpu"
       V_TAG="${IMAGE_TAG}-tpu"
       V_LATEST_TAG="latest-tpu"
-      V_DESC="TPU"
+      V_DESC="JupyterLab TPU"
       ;;
     spark)
       V_DOCKERFILE="Dockerfile.spark"
@@ -284,10 +263,10 @@ echo "=================================================================="
 # ==============================================================================
 if [[ "${REGISTER_WSK}" == "true" ]]; then
   echo "=================================================================="
-  echo "Registering WorkspaceKind 'codeserver' in Kubernetes cluster..."
+  echo "Registering WorkspaceKind 'jupyterlab' in Kubernetes cluster..."
   echo "=================================================================="
   envsubst < "${CONTEXT_DIR}/workspacekind.yaml" | kubectl apply -f -
-  echo "WorkspaceKind 'codeserver' applied successfully."
+  echo "WorkspaceKind 'jupyterlab' applied successfully."
 
   if [[ -d "${MANIFESTS_DIR}" ]]; then
     echo "=================================================================="

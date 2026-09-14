@@ -1,15 +1,15 @@
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
-  name: codeserver
+  name: jupyterlab
 spec:
   spawner:
-    displayName: "VS Code (code-server)"
-    description: "A Workspace which runs VS Code (code-server) in a Pod"
+    displayName: "JupyterLab Notebook"
+    description: "A Workspace which runs JupyterLab in a Pod"
     icon:
-      url: "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg"
+      url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
     logo:
-      url: "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg"
+      url: "https://upload.wikimedia.org/wikipedia/commons/3/38/Jupyter_logo.svg"
 
   filterRules:
     # --------------------------------------------------------------------------
@@ -151,16 +151,25 @@ spec:
     serviceAccount:
       clusterRoles:
         - name: "kubeflow-edit"
+    activityProbe:
+      minProbeIntervalSeconds: 300
+      probeIntervalSeconds: 3600
+      jupyter:
+        lastActivity: true
+        portId: "jupyterlab"
     volumeMounts:
       home: "/home/jovyan"
     ports:
-      - id: "codeserver"
-        defaultDisplayName: "VS Code (code-server)"
+      - id: "jupyterlab"
+        defaultDisplayName: "JupyterLab"
         protocol: "HTTP"
         httpProxy:
-          removePathPrefix: true
+          removePathPrefix: false
           requestHeaders: {}
     extraEnv:
+      - name: "NB_PREFIX"
+        value: |-
+          {{ httpPathPrefix "jupyterlab" }}
       - name: "LD_LIBRARY_PATH"
         value: "/usr/local/nvidia/lib64"
       - name: "PATH"
@@ -191,67 +200,73 @@ spec:
     options:
       imageConfig:
         spawner:
-          default: "codeserver-python-cpu"
+          default: "jupyterlab-cpu"
         values:
-          - id: "codeserver-python-cpu"
+          - id: "jupyterlab-cpu"
             spawner:
-              displayName: "codeserver-python (CPU)"
-              description: "code-server with Conda Python"
+              displayName: "jupyterlab (CPU)"
+              description: "JupyterLab with SciPy, JAX (CPU), and Kubeflow Spark SDK"
               labels:
                 - key: "python_version"
-                  value: "3.12"
+                  value: "3.12.9"
                 - key: "accelerator"
                   value: "cpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-cpu"
               imagePullPolicy: "Always"
               ports:
-                - id: "codeserver"
+                - id: "jupyterlab"
                   port: 8888
-          - id: "codeserver-python-gpu"
+          - id: "jupyterlab-gpu"
             spawner:
-              displayName: "codeserver-python (GPU)"
-              description: "code-server with Conda Python, CUDA, PyTorch, and GPU JAX"
+              displayName: "jupyterlab (GPU)"
+              description: "JupyterLab with PyTorch (CUDA 12.4), JAX (CUDA), and Kubeflow Spark SDK"
               labels:
                 - key: "python_version"
-                  value: "3.12"
+                  value: "3.12.9"
+                - key: "pytorch_version"
+                  value: "2.5.1"
+                - key: "cuda_version"
+                  value: "12.4"
+                - key: "nccl_version"
+                  value: "2.21.5"
                 - key: "accelerator"
                   value: "gpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-gpu"
               imagePullPolicy: "Always"
               ports:
-                - id: "codeserver"
+                - id: "jupyterlab"
                   port: 8888
-          - id: "codeserver-python-tpu"
+          - id: "jupyterlab-tpu"
             spawner:
-              displayName: "codeserver-python (TPU)"
-              description: "code-server with Conda Python, and TPU JAX (libtpu)"
+              displayName: "jupyterlab (TPU)"
+              description: "JupyterLab with TPU JAX (libtpu) and Kubeflow Spark SDK"
               labels:
                 - key: "python_version"
-                  value: "3.12"
+                  value: "3.12.9"
                 - key: "accelerator"
                   value: "tpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-tpu"
               imagePullPolicy: "Always"
               ports:
-                - id: "codeserver"
+                - id: "jupyterlab"
                   port: 8888
-          - id: "codeserver-python:v1.11.0"
+          - id: "jupyter-scipy:v1.10.0"
             spawner:
-              displayName: "codeserver-python:v1.11.0 (Upstream)"
-              description: "Upstream Kubeflow code-server with Conda Python"
+              displayName: "jupyter-scipy:v1.10.0 (Upstream)"
+              description: "Upstream JupyterLab with SciPy Packages"
               labels:
                 - key: "python_version"
-                  value: "3.12"
+                  value: "3.12.9"
                 - key: "accelerator"
                   value: "cpu"
             spec:
-              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0"
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
               imagePullPolicy: "IfNotPresent"
               ports:
-                - id: "codeserver"
+                - id: "jupyterlab"
                   port: 8888
       podConfig:
         spawner:

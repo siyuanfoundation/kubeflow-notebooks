@@ -21,6 +21,12 @@ export STATIC_IP="${STATIC_IP:-}"
 # If unset or empty, defaults automatically to "<EXTERNAL_IP>.sslip.io" (zero DNS configuration required).
 export CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
 
+# Optional: Install Kubeflow Spark Operator for distributed Spark jobs (default: true, set INSTALL_SPARK_OPERATOR=false to skip)
+export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
+
+# Optional: GCS bucket name used by distributed_tpu_example.ipynb (defaults to ${USER_NAMESPACE}-bucket)
+export GCS_BUCKET="${GCS_BUCKET:-${USER_NAMESPACE}-bucket}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-/tmp/kubeflow-community-distribution}"
 
@@ -170,6 +176,25 @@ kubectl wait --for=condition=Established crd/trainjobs.trainer.kubeflow.org --ti
 kubectl apply -k applications/trainer/overlays --server-side --force-conflicts
 
 # ==============================================================================
+# Step 6b: Deploy Kubeflow Spark Operator (Optional)
+# ==============================================================================
+if [ "${INSTALL_SPARK_OPERATOR}" = "true" ]; then
+  echo "=================================================================="
+  echo "Step 6b: Deploying Kubeflow Spark Operator..."
+  echo "=================================================================="
+  kubectl apply -k applications/spark/spark-operator/overlays/kubeflow --server-side --force-conflicts
+  echo "Waiting for Spark Operator CRDs to be established..."
+  kubectl wait --for=condition=Established crd/sparkapplications.sparkoperator.k8s.io --timeout=60s
+  kubectl wait --for=condition=Established crd/scheduledsparkapplications.sparkoperator.k8s.io --timeout=60s
+  kubectl wait --for=condition=Established crd/sparkconnects.sparkoperator.k8s.io --timeout=60s
+
+  echo "Waiting for Spark Operator controller and webhook to be ready..."
+  kubectl rollout status deployment/spark-operator-controller -n kubeflow --timeout=180s
+  kubectl rollout status deployment/spark-operator-webhook -n kubeflow --timeout=180s
+  kubectl wait --for=jsonpath='{.subsets[0].addresses[0].targetRef.kind}'=Pod endpoints/spark-operator-webhook-svc -n kubeflow --timeout=180s || true
+fi
+
+# ==============================================================================
 # Step 7: Deploy Profiles for Admin & Standard User
 # ==============================================================================
 echo "=================================================================="
@@ -207,9 +232,26 @@ echo "=================================================================="
 echo "Waiting for workspaces-controller webhook to be ready..."
 kubectl rollout status deployment/workspaces-controller -n kubeflow-workspaces --timeout=180s
 
-kubectl apply -f applications/workspaces/upstream/controller/samples/jupyterlab_v1beta1_workspacekind.yaml
-if kubectl get wsk jupyterlab -o jsonpath='{.spec.filterRules}' 2>/dev/null | grep -q '.'; then
-  kubectl patch wsk jupyterlab --type='json' -p='[{"op": "remove", "path": "/spec/filterRules"}]'
+if [ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]; then
+  echo "Applying WorkspaceKind 'jupyterlab' from ${SCRIPT_DIR}/jupyterlab/workspacekind.yaml..."
+  PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}" \
+  REGION="${REGION:-us-west1}" \
+  REPO_NAME="${REPO_NAME:-kubeflow-repo}" \
+  IMAGE_NAME="jupyterlab" \
+  GCS_BUCKET="${GCS_BUCKET}" \
+    envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" | kubectl apply -f -
+else
+  kubectl apply -f applications/workspaces/upstream/controller/samples/jupyterlab_v1beta1_workspacekind.yaml
+  if kubectl get wsk jupyterlab -o jsonpath='{.spec.filterRules}' 2>/dev/null | grep -q '.'; then
+    kubectl patch wsk jupyterlab --type='json' -p='[{"op": "remove", "path": "/spec/filterRules"}]'
+  fi
+  kubectl patch wsk jupyterlab --type='merge' -p='{"spec":{"podTemplate":{"serviceAccount":{"clusterRoles":[{"name":"kubeflow-edit"}]}}}}'
+fi
+
+# Register GKE ComputeClass definitions (GPU and TPU) for distributed training / accelerator jobs
+if [ -d "${SCRIPT_DIR}/manifests" ]; then
+  echo "Applying GKE ComputeClass manifests (GPU and TPU)..."
+  kubectl apply -f "${SCRIPT_DIR}/manifests/"
 fi
 
 kubectl apply -f - <<EOF
@@ -230,6 +272,9 @@ rules:
 - apiGroups: ["trainer.kubeflow.org"]
   resources: ["clustertrainingruntimes"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["sparkoperator.k8s.io"]
+  resources: ["sparkapplications", "scheduledsparkapplications", "sparkconnects"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -280,6 +325,11 @@ kubectl rollout status deployment/workspaces-frontend -n kubeflow-workspaces --t
 kubectl rollout status deployment/kubeflow-trainer-controller-manager -n kubeflow-system --timeout=180s
 kubectl rollout status deployment/jobset-controller-manager -n kubeflow-system --timeout=180s
 
+if [ "${INSTALL_SPARK_OPERATOR}" = "true" ]; then
+  kubectl rollout status deployment/spark-operator-controller -n kubeflow --timeout=180s
+  kubectl rollout status deployment/spark-operator-webhook -n kubeflow --timeout=180s
+fi
+
 echo "Waiting for User Namespace ServiceAccounts (default-editor) to be created..."
 for ns in "${ADMIN_NAMESPACE}" "${USER_NAMESPACE}"; do
   for i in {1..30}; do
@@ -291,6 +341,15 @@ for ns in "${ADMIN_NAMESPACE}" "${USER_NAMESPACE}"; do
     sleep 2
   done
   kubectl get serviceaccount default-editor -n "${ns}"
+
+  # Grant kubeflow-edit permissions to all ServiceAccounts in the user namespace
+  # so Workspace pods (ws-*), Spark driver pods, and TrainJob pods can create
+  # SparkConnects, TrainJobs, Deployments, Services, and ConfigMaps in their namespace.
+  kubectl create rolebinding kubeflow-workspace-sa-edit \
+    --clusterrole=kubeflow-edit \
+    --group="system:serviceaccounts:${ns}" \
+    -n "${ns}" \
+    --dry-run=client -o yaml | kubectl apply -f -
 done
 
 # ==============================================================================
@@ -549,3 +608,39 @@ echo ""
 echo "Credentials:"
 echo "  Admin User:    ${ADMIN_NAME} / ${ADMIN_PASSWORD} (Namespace: ${ADMIN_NAMESPACE})"
 echo "  Standard User: ${USER_NAME} / ${USER_PASSWORD} (Namespace: ${USER_NAMESPACE})"
+echo ""
+echo "=================================================================="
+echo "Running distributed_tpu_example.ipynb (GCS Bucket IAM Access)"
+echo "=================================================================="
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+PROJECT_NUMBER=""
+if [ -n "${PROJECT_ID}" ]; then
+  PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)" 2>/dev/null || true)"
+fi
+
+if [ -n "${GCS_BUCKET}" ] && [ -n "${PROJECT_ID}" ] && [ -n "${PROJECT_NUMBER}" ]; then
+  echo "Configuring GCS bucket gs://${GCS_BUCKET} IAM policy bindings for Workload Identity..."
+  if ! gcloud storage buckets describe "gs://${GCS_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Creating GCS bucket gs://${GCS_BUCKET}..."
+    gcloud storage buckets create "gs://${GCS_BUCKET}" --location="${REGION:-us-west1}" --project="${PROJECT_ID}" || true
+  fi
+  for ns in "${ADMIN_NAMESPACE}" "${USER_NAMESPACE}"; do
+    gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
+      --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${ns}" \
+      --role="roles/storage.objectUser" >/dev/null || true
+  done
+  echo "✅ Granted roles/storage.objectUser on gs://${GCS_BUCKET} to namespaces ${ADMIN_NAMESPACE} and ${USER_NAMESPACE}."
+else
+  echo "To grant your Workspace namespace access to a GCS bucket (e.g. for distributed_tpu_example.ipynb),"
+  echo "run the following command from your terminal (grants access to all pods/SAs in the namespace):"
+  echo ""
+  echo "  export PROJECT_ID=\"${PROJECT_ID:-<your-project-id>}\""
+  echo "  export PROJECT_NUMBER=\"${PROJECT_NUMBER:-<your-project-number>}\""
+  echo "  export BUCKET=\"${GCS_BUCKET:-${USER_NAMESPACE}-bucket}\""
+  echo "  export NAMESPACE=\"${USER_NAMESPACE}\"  # or ${ADMIN_NAMESPACE}"
+  echo ""
+  echo "  gcloud storage buckets add-iam-policy-binding gs://\${BUCKET} \\"
+  echo "    --member=\"principalSet://iam.googleapis.com/projects/\${PROJECT_NUMBER}/locations/global/workloadIdentityPools/\${PROJECT_ID}.svc.id.goog/namespace/\${NAMESPACE}\" \\"
+  echo "    --role=\"roles/storage.objectUser\""
+fi
+echo "=================================================================="

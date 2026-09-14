@@ -51,9 +51,13 @@ fi
 kubectl delete namespace "${ADMIN_NAMESPACE}" "${USER_NAMESPACE}" --ignore-not-found=true --wait=false
 
 echo "=================================================================="
-echo "Step 3: Deleting Kubeflow Trainer (v2)..."
+echo "Step 3: Deleting Kubeflow Trainer (v2) & Spark Operator..."
 echo "=================================================================="
 kubectl delete -k applications/trainer/overlays --ignore-not-found=true --wait=false || true
+kubectl delete -k applications/spark/spark-operator/overlays/kubeflow --ignore-not-found=true --wait=false || true
+if [ -d "${SCRIPT_DIR}/manifests" ]; then
+  kubectl delete -f "${SCRIPT_DIR}/manifests/" --ignore-not-found=true || true
+fi
 
 echo "=================================================================="
 echo "Step 4: Deleting Kubeflow Workspaces (Notebooks v2)..."

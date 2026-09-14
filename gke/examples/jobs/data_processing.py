@@ -286,9 +286,9 @@ def run_etl(spark, bucket_name, raw_dir="/tmp/raw", num_shards=4):
 
 def main():
     from pyspark.sql import SparkSession
-    bucket_name = os.environ.get("DEMO_BUCKET")
+    bucket_name = os.environ.get("GCS_BUCKET")
     if not bucket_name:
-        raise ValueError("DEMO_BUCKET environment variable must be set")
+        raise ValueError("GCS_BUCKET environment variable must be set")
     num_shards = int(os.environ.get("NUM_SHARDS", "4"))
     
     spark = SparkSession.builder.appName("fashion-mnist-etl").getOrCreate()

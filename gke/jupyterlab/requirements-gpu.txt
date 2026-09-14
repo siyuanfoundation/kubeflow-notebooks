@@ -1,8 +1,6 @@
 # Kubeflow packages (GPU / CUDA)
 google-cloud-storage
 jax[cuda12]
-torch
-torchvision
 kfp==2.16.1
 kubeflow[spark]==0.4.0
 matplotlib

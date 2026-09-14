@@ -20,16 +20,35 @@ import time
 
 from kubernetes import client, config
 from kubeflow.common.types import KubernetesBackendConfig
-from kubeflow.spark import Driver, Executor, SparkClient, Name, NodeSelector
+from kubeflow.spark import (
+    Driver,
+    Executor,
+    Name,
+    SparkClient,
+)
 from kubeflow.trainer import CustomTrainer, TrainerClient
 from kubeflow.trainer.options import kubernetes as k8s_options
 
-NAMESPACE = os.environ.get("DEMO_NAMESPACE", "default")
-BUCKET_NAME = os.environ.get("DEMO_BUCKET", "sizhang-gke-dev-ml-demo-data")
-DEMO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Spark node selector — pins Spark pods to N2 nodes with ample RAM to avoid memory eviction
-SPARK_NODE_SELECTOR = {"cloud.google.com/machine-family": "n2"}
+def _get_current_namespace():
+    """Return DEMO_NAMESPACE if set, else the pod's mounted serviceaccount namespace, else 'default'."""
+    if os.environ.get("DEMO_NAMESPACE"):
+        return os.environ["DEMO_NAMESPACE"]
+    ns_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+    if os.path.exists(ns_path):
+        try:
+            with open(ns_path) as f:
+                ns = f.read().strip()
+                if ns:
+                    return ns
+        except OSError:
+            pass
+    return "default"
+
+
+NAMESPACE = _get_current_namespace()
+BUCKET_NAME = os.environ.get("GCS_BUCKET", f"{NAMESPACE}-bucket")
+DEMO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # TPU slice selector — matches the multi-host ComputeClass in tpu-compute-class.yaml.
 TPU_NODE_SELECTOR = {"cloud.google.com/compute-class": "tpu-v5-8-multi-host"}
@@ -39,9 +58,9 @@ TPU_TOLERATIONS = [
 ]
 
 # Images
-REGISTRY = os.environ.get("REGISTRY", "us-west1-docker.pkg.dev/sizhang-gke-dev/sizhang-repo")
-TAG = os.environ.get("TAG", "local-gke-dev")
-SPARK_IMAGE = os.environ.get("DEMO_SPARK_IMAGE", f"{REGISTRY}/spark-py311:{TAG}")
+REGISTRY = os.environ.get("REGISTRY", "us-west1-docker.pkg.dev/my-project/kubeflow-repo")
+TAG = os.environ.get("TAG", "latest")
+SPARK_IMAGE = f"{REGISTRY}/spark-py312:{TAG}"
 TPU_IMAGE = os.environ.get(
     "DEMO_TPU_IMAGE", "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 )
@@ -52,7 +71,7 @@ def _client():
 
 
 def _tpu_placement_patch(replicated_job_name="node"):
-    """Return a RuntimePatch that pins pods to TPU nodes."""
+    """Return a RuntimePatch that pins pods to TPU nodes and disables Istio sidecar injection."""
     return k8s_options.RuntimePatch(
         training_runtime_spec=k8s_options.TrainingRuntimeSpecPatch(
             template=k8s_options.JobSetTemplatePatch(
@@ -63,10 +82,15 @@ def _tpu_placement_patch(replicated_job_name="node"):
                             template=k8s_options.JobTemplatePatch(
                                 spec=k8s_options.JobSpecPatch(
                                     template=k8s_options.PodTemplatePatch(
+                                        metadata={
+                                            "labels": {
+                                                "sidecar.istio.io/inject": "false",
+                                            }
+                                        },
                                         spec=k8s_options.PodSpecPatch(
                                             node_selector=TPU_NODE_SELECTOR,
                                             tolerations=TPU_TOLERATIONS,
-                                        )
+                                        ),
                                     )
                                 )
                             ),
@@ -90,7 +114,38 @@ def _get_k8s_core_api():
     return client.CoreV1Api()
 
 
+def _configure_spark_connect(resource, backend):
+    """Configure SparkConnect driver/executor templates with Istio sidecar exclusion and container definitions."""
+    from kubeflow_spark_api import models
 
+    no_sidecar = {"sidecar.istio.io/inject": "false"}
+    pyspark_env = [
+        models.IoK8sApiCoreV1EnvVar(name="PYSPARK_PYTHON", value="/usr/bin/python3.12"),
+        models.IoK8sApiCoreV1EnvVar(name="PYSPARK_DRIVER_PYTHON", value="/usr/bin/python3.12"),
+    ]
+    if isinstance(resource, models.SparkV1alpha1SparkConnect):
+        for role_spec, container_name in [
+            (resource.spec.server, "spark-connect-server"),
+            (resource.spec.executor, "spark-kubernetes-executor"),
+        ]:
+            if role_spec.template is None:
+                role_spec.template = models.IoK8sApiCoreV1PodTemplateSpec()
+            if role_spec.template.metadata is None:
+                role_spec.template.metadata = models.IoK8sApimachineryPkgApisMetaV1ObjectMeta()
+            if role_spec.template.metadata.labels is None:
+                role_spec.template.metadata.labels = {}
+            role_spec.template.metadata.labels.update(no_sidecar)
+            container = models.IoK8sApiCoreV1Container(
+                name=container_name,
+                image_pull_policy="Always",
+                env=pyspark_env,
+            )
+            if role_spec.template.spec is None:
+                role_spec.template.spec = models.IoK8sApiCoreV1PodSpec(
+                    containers=[container]
+                )
+            elif not role_spec.template.spec.containers:
+                role_spec.template.spec.containers = [container]
 
 
 def run_data_processing(num_executors=4, num_shards=4, wait=True):
@@ -104,7 +159,7 @@ def run_data_processing(num_executors=4, num_shards=4, wait=True):
     # Package jobs directory as zip and send to Spark executors
     import shutil
     import tempfile
-    
+
     tmp_dir = tempfile.gettempdir()
     zip_path = os.path.join(tmp_dir, "jobs")
     if os.path.exists(zip_path + ".zip"):
@@ -112,25 +167,38 @@ def run_data_processing(num_executors=4, num_shards=4, wait=True):
     shutil.make_archive(zip_path, "zip", root_dir=DEMO_DIR, base_dir="jobs")
     zip_file = zip_path + ".zip"
 
-    print(f"[pipeline] connecting to Spark ({num_executors} executors) via GCS bucket {BUCKET_NAME}...")
+    print(f"[pipeline] connecting to Spark ({num_executors} executors) in namespace '{NAMESPACE}' via GCS bucket {BUCKET_NAME}...")
 
-    client = SparkClient(backend_config=KubernetesBackendConfig(namespace=NAMESPACE))
+    spark_client = SparkClient(backend_config=KubernetesBackendConfig(namespace=NAMESPACE))
 
-    spark = client.connect(
+    # Clean up any leftover session with the same name so re-running is idempotent
+    try:
+        spark_client.delete_session(SPARK_APP_NAME)
+        time.sleep(2)
+    except Exception:  # noqa: BLE001
+        pass
+
+    options = [
+        Name(SPARK_APP_NAME),
+        _configure_spark_connect,
+    ]
+
+    spark = spark_client.connect(
         num_executors=num_executors,
-        driver=Driver(image=SPARK_IMAGE, resources={"cpu": "1", "memory": "4Gi"}),
+        driver=Driver(
+            image=SPARK_IMAGE,
+            resources={"cpu": "1", "memory": "4Gi"},
+        ),
         executor=Executor(
             num_instances=num_executors,
             resources_per_executor={"cpu": "1", "memory": "4Gi"},
         ),
-        options=[
-            Name(SPARK_APP_NAME),
-            NodeSelector(SPARK_NODE_SELECTOR),
-        ],
+        options=options,
         spark_conf={
-            "spark.kubernetes.container.image": SPARK_IMAGE,
-            "spark.kubernetes.driver.label.sidecar.istio.io/inject": "false",
-            "spark.kubernetes.executor.label.sidecar.istio.io/inject": "false",
+            "spark.pyspark.python": "/usr/bin/python3.12",
+            "spark.pyspark.driver.python": "/usr/bin/python3.12",
+            "spark.executorEnv.PYSPARK_PYTHON": "/usr/bin/python3.12",
+            "spark.kubernetes.container.image.pullPolicy": "Always",
         },
     )
     
