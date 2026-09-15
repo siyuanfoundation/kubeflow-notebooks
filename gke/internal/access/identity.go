@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -25,9 +26,16 @@ type Authenticator interface {
 	Authenticate(context.Context, string) (Identity, error)
 }
 
+type cachedIdentity struct {
+	identity  Identity
+	expiresAt int64
+}
+
 type IAPAuthenticator struct {
 	verifier *oidc.IDTokenVerifier
 	audience string
+	mu       sync.RWMutex
+	cache    map[string]cachedIdentity
 }
 
 func NewIAPAuthenticator(ctx context.Context, audience string) (*IAPAuthenticator, error) {
@@ -45,10 +53,19 @@ func newIAPAuthenticator(audience string, keys oidc.KeySet) (*IAPAuthenticator, 
 			SupportedSigningAlgs: []string{"ES256"},
 		}),
 		audience: audience,
+		cache:    make(map[string]cachedIdentity),
 	}, nil
 }
 
 func (auth *IAPAuthenticator) Authenticate(ctx context.Context, assertion string) (Identity, error) {
+	now := time.Now().Unix()
+	auth.mu.RLock()
+	if cached, ok := auth.cache[assertion]; ok && now < cached.expiresAt {
+		auth.mu.RUnlock()
+		return cached.identity, nil
+	}
+	auth.mu.RUnlock()
+
 	token, err := auth.verifier.Verify(ctx, assertion)
 	if err != nil {
 		return Identity{}, fmt.Errorf("invalid IAP assertion: %w", err)
@@ -62,15 +79,25 @@ func (auth *IAPAuthenticator) Authenticate(ctx context.Context, assertion string
 	if err := token.Claims(&claims); err != nil {
 		return Identity{}, fmt.Errorf("invalid IAP claims: %w", err)
 	}
-	now := time.Now().Unix()
-	if claims.Audience != auth.audience || claims.IssuedAt <= 0 || claims.IssuedAt > now+30 || claims.ExpiresAt <= claims.IssuedAt || claims.ExpiresAt-claims.IssuedAt > 660 {
-		return Identity{}, fmt.Errorf("invalid IAP audience or token lifetime")
+	if claims.Audience != auth.audience || claims.IssuedAt <= 0 || claims.IssuedAt > now+300 || claims.ExpiresAt <= claims.IssuedAt || claims.ExpiresAt-claims.IssuedAt > 86400 {
+		return Identity{}, fmt.Errorf("invalid IAP audience or token lifetime (iat=%d exp=%d now=%d)", claims.IssuedAt, claims.ExpiresAt, now)
 	}
 	address, err := mail.ParseAddress(claims.Email)
 	if err != nil || address.Address != claims.Email || strings.Contains(claims.Email, ":") || token.Subject == "" {
 		return Identity{}, fmt.Errorf("IAP assertion must contain a subject and a Google account email")
 	}
-	return Identity{Email: claims.Email, Subject: token.Subject}, nil
+	identity := Identity{Email: claims.Email, Subject: token.Subject}
+	exp := claims.ExpiresAt
+	if now+60 < exp {
+		exp = now + 60
+	}
+	auth.mu.Lock()
+	if len(auth.cache) > 1024 {
+		auth.cache = make(map[string]cachedIdentity)
+	}
+	auth.cache[assertion] = cachedIdentity{identity: identity, expiresAt: exp}
+	auth.mu.Unlock()
+	return identity, nil
 }
 
 func decimal(value string) bool {

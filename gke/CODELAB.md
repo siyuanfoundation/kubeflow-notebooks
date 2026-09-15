@@ -41,6 +41,12 @@ export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
   ```bash
   export OAUTH_FILE="/absolute/private/path/oauth-client.json"
   ```
+- **Option E — Access Proxy Kubernetes API Rate-Limiter (`KUBE_CLIENT_QPS` & `KUBE_CLIENT_BURST`)**
+  By default, `gke-access-proxy` configures its Kubernetes API client with `KUBE_CLIENT_QPS=100` (`kubeClientQPS`) and `KUBE_CLIENT_BURST=200` (`kubeClientBurst`) and caches resolved Workspace targets for 5 seconds so JupyterLab's concurrent kernel/status/autosave bursts never trigger `client-go` client-side throttling (`503 Service Unavailable`). Override if needed:
+  ```bash
+  export KUBE_CLIENT_QPS="100"
+  export KUBE_CLIENT_BURST="200"
+  ```
 
 ---
 
@@ -121,6 +127,34 @@ Observed end-to-end execution results (`jupyter nbconvert --to notebook --execut
 | **Stage 1: Spark ETL** | `SparkConnect/fashion-mnist-etl` (1 driver + 4 executors) | Driver `fashion-mnist-etl-server` and 4 executors (`exec-1` through `exec-4`) launched in `kubeflow-user` using dual-Python (`3.11`/`3.12`) `spark-py312:latest`. Preprocessed 60,000 train examples across 4 shards (`shard-000.npz` to `shard-003.npz`) + `_SUCCESS` marker in `gs://kubeflow-user-bucket/processed/`. |
 | **Stage 2: Multi-Host TPU** | `TrainJob/cc805800034c` (`jax-distributed`, `tpu-v5-8-multi-host`) | GKE Node Auto-Provisioning provisioned 2 `ct5lp-hightpu-4t` nodes (`gke-tpu-bdf9bfbf-4hgw`, `gke-tpu-bdf9bfbf-t4jh`). 2 worker pods (`node-0-0`, `node-0-1`, 4 TPU chips each = 8 global TPU cores) trained 5 epochs in 4.2s (`final_test_accuracy: 0.8289`) and wrote `model/metrics.json` + `model/params.npz` to `gs://kubeflow-user-bucket/model/`. |
 | **Stage 3: Serving** | `Deployment/fashion-mnist-inference` & `Service` | Deployed 2-replica inference service in `kubeflow-user`. Sent 5 test images from `ws-test-workspace-md2wx-0` to `http://fashion-mnist-inference.kubeflow-user.svc.cluster.local/predict`; 5/5 predictions matched ground truth (`Ankle boot`, `Pullover`, `Trouser`, `Trouser`, `Shirt`). |
+
+### Root Causes & Fixes for Intermittent `503 Service Unavailable` / `Server Connection Error` in JupyterLab
+- **Symptoms**:
+  - `File Save Error for distributed_tpu_example.ipynb 503`
+  - `Server Connection Error: A connection to the Jupyter server could not be established. JupyterLab will continue trying to reconnect.`
+- **Root Causes**:
+  1. **`gke-access-proxy` `http.Server` `IdleTimeout: 60s` vs. Google Cloud Load Balancer `600s` Keep-Alive Timeout**:
+     - Google Cloud External HTTP(S) Load Balancer (`gke-l7-global-external-managed`) maintains persistent HTTP/1.1 keep-alive connections to backend pods (`gke-access-proxy`) with a fixed **600-second (10-minute)** idle timeout.
+     - Because `gke-access-proxy` (`cmd/access-proxy/main.go`) configured `http.Server.IdleTimeout: 60 * time.Second`, Go's HTTP server closed idle keep-alive connections every 60 seconds (`FIN`/`RST`).
+     - When JupyterLab sent periodic requests (such as autosave every 120 seconds or background status polling), Google Cloud Load Balancer reused a 60s-old keep-alive connection right as `gke-access-proxy` closed it, received `EOF` / `connection reset by peer` (`backend_connection_closed_before_data_sent_to_client`), and returned **`502` / `503` directly from the load balancer** before `gke-access-proxy` ever read the request.
+  2. **Over-Strict Manual IAP JWT Clock Skew & Lifetime Bounds (`identity.go`)**:
+     - `IAPAuthenticator.Authenticate()` enforced `claims.IssuedAt <= now+30` and `claims.ExpiresAt - claims.IssuedAt <= 660`. Whenever a Google Front End (GFE) had >30s clock skew or issued/cached an `X-Goog-Iap-Jwt-Assertion` JWT with lifetime >660s, `Authenticate()` rejected the valid cryptographically verified JWT with `401 Unauthorized`, triggering JupyterLab's `Server Connection Error` modal.
+  3. **`client-go` Default Client-Side Rate Limiting (`5 QPS` / `10 Burst`) & Cache Stampede**:
+     - On every incoming HTTP request to `/workspace/connect/{namespace}/{workspace}/{port}/...`, `KubernetesAccess.Resolve()` executed 4 sequential Kubernetes API calls (`SubjectAccessReview` POST + `Workspace` GET + `WorkspaceKind` GET + `Service` LIST) using `client-go`'s default `QPS = 5.0` and `Burst = 10`.
+  4. **Multi-Replica `gke-access-proxy` Load Balancing Without Session Affinity**:
+     - Because `gke-access-proxy` runs 2 replicas behind the Google Cloud Global External Load Balancer (`GCPBackendPolicy/notebooks-iap`), without `sessionAffinity: GENERATED_COOKIE`, the load balancer distributed a single browser tab's HTTP requests and WebSocket reconnects across different `gke-access-proxy` pods.
+  5. **GCE Enforcer Deleting Untagged `gkegw1-*` Gateway Firewall Rule Every 5 Minutes (`503 failed_to_pick_backend`)**:
+     - In Google-internal GCP projects (`google.com` org), **GCE Enforcer** (`gceenforcer-enforcer@system.gserviceaccount.com`) sweeps VPC firewall rules every 5 minutes and 10 seconds. Per GCE Enforcer's exemption logic (`SingleProjectAddRuleHandler.Callback`), `gke-*`/`gkegw1-*` rules are only preserved if they specify non-empty `targetTags` or RFC1918-only `sourceRanges`.
+     - The GKE Gateway controller creates `gkegw1-silh-l7-default-global` allowing GCLB health check and GFE proxy source ranges (`35.191.0.0/16` and `130.211.0.0/22`) to TCP `0-65535` **without any `targetTags`**. Consequently, GCE Enforcer deleted `gkegw1-silh-l7-default-global` every 5 minutes (`20:24`, `20:29`, `20:34`, `20:39`, `20:44`, `20:50`).
+     - Every time the firewall rule was deleted, Google Cloud Load Balancer health probes to `gke-access-proxy:8080/healthz` timed out, both NEGs transitioned to `UNHEALTHY`, and the load balancer returned **`503 Service Unavailable (failed_to_pick_backend)`** for 1–2 minutes until the GKE Gateway controller reconciled and recreated the firewall rule.
+- **Fixes**:
+  1. **Match GCLB Backend Keep-Alive Timeout (`IdleTimeout: 650s`)**: Increased `http.Server.IdleTimeout` from `60s` to `650 * time.Second` (`> 600s` GCLB keep-alive timeout) in [`gke/cmd/access-proxy/main.go`](cmd/access-proxy/main.go).
+  2. **Verified IAP JWT In-Memory Cache & Relaxed Bounds (`identity.go`)**: Added an in-memory cache of cryptographically verified IAP JWT assertions (`assertion -> {identity, expiresAt}`) and updated bounds to allow 300s clock skew (`now+300`) and up to 24h token lifetime (`86400s`) in [`gke/internal/access/identity.go`](internal/access/identity.go).
+  3. **Configurable Kubernetes Client Rate-Limiter (`KUBE_CLIENT_QPS` & `KUBE_CLIENT_BURST`)**: Added `KUBE_CLIENT_QPS` (`kubeClientQPS`, default `100`) and `KUBE_CLIENT_BURST` (`kubeClientBurst`, default `200`) to `Config`, `gke-access-proxy` ConfigMap, CLI flags (`--kube-qps`, `--kube-burst`), and `deploy_standalone.sh`.
+  4. **Stale-While-Revalidate + Singleflight Deduplication**: Upgraded `KubernetesAccess.Resolve()` with a 30s fresh TTL, 5-minute stale-while-revalidate window with background async refresh, and singleflight request deduplication (`resolveCall` with `sync.WaitGroup`).
+  5. **`GENERATED_COOKIE` Session Affinity (`cookieTtlSec: 86400`) & LB Logging**: Added `sessionAffinity: {type: GENERATED_COOKIE, cookieTtlSec: 86400}` and `logging: {enabled: true, sampleRate: 1000000}` to `GCPBackendPolicy/notebooks-iap` in [`gke/internal/deploy/render.go`](internal/deploy/render.go) and patched the live cluster.
+  6. **Upstream HTTP Keep-Alive Connection Pooling**: Configured `MaxIdleConns: 256`, `MaxIdleConnsPerHost: 64`, `IdleConnTimeout: 300 * time.Second`, and `ResponseHeaderTimeout: 120 * time.Second` on `http.Transport` in [`gke/internal/access/proxy.go`](internal/access/proxy.go).
+  7. **GKE-Node-Tagged Firewall Rule (`gke-kubeflow-notebooks-db3216d9-gclb-hc`) Exempt from GCE Enforcer**: Created a persistent firewall rule prefixed with `gke-` and explicitly tagged with `--target-tags=gke-kubeflow-notebooks-db3216d9-node` allowing `--source-ranges=35.191.0.0/16,130.211.0.0/22` on `--allow=tcp:8080,tcp:8081` (and added automatic creation to [`gke/deploy_standalone.sh`](deploy_standalone.sh)). GCE Enforcer recognizes `gke-*` rules with `targetTags` as GKE-managed and never deletes them, keeping all `gke-access-proxy` NEGs `HEALTHY` continuously without 5-minute `503 failed_to_pick_backend` drops.
 
 ## 2026-09-12 working single-user pilot
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -52,7 +53,10 @@ func NewProxy(auth Authenticator, workspaces WorkspaceAccess, frontend, backend,
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 64
+	transport.IdleConnTimeout = 300 * time.Second
+	transport.ResponseHeaderTimeout = 120 * time.Second
 	return &Proxy{auth: auth, workspaces: workspaces, frontend: frontend, backend: backend, publicOrigin: "https://" + publicURL.Host, publicHost: publicURL.Host, transport: transport}, nil
 }
 
@@ -66,6 +70,7 @@ func (proxy *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	if request.Host != proxy.publicHost {
+		log.Printf("rejected request for unknown host %q (expected %q) on path %s", request.Host, proxy.publicHost, request.URL.Path)
 		http.Error(response, "unknown host", http.StatusMisdirectedRequest)
 		return
 	}
@@ -73,11 +78,13 @@ func (proxy *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Reques
 	unsafe := request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodOptions
 	upgrade := strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	if (origin != "" || unsafe || upgrade) && origin != proxy.publicOrigin {
+		log.Printf("rejected origin %q (expected %q) for %s %s", origin, proxy.publicOrigin, request.Method, request.URL.Path)
 		http.Error(response, "origin denied", http.StatusForbidden)
 		return
 	}
 	assertions := request.Header.Values(IAPHeader)
 	if len(assertions) != 1 || assertions[0] == "" {
+		log.Printf("missing or multiple IAP assertions (%d) for %s %s", len(assertions), request.Method, request.URL.Path)
 		http.Error(response, "authentication required", http.StatusUnauthorized)
 		return
 	}
@@ -85,10 +92,12 @@ func (proxy *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Reques
 	identity, err := proxy.auth.Authenticate(ctx, assertions[0])
 	cancel()
 	if err != nil {
+		log.Printf("IAP authentication failed for %s %s: %v", request.Method, request.URL.Path, err)
 		http.Error(response, "invalid identity", http.StatusUnauthorized)
 		return
 	}
 	if !safePath(request.URL) {
+		log.Printf("rejected unsafe path %q", request.URL.Path)
 		http.Error(response, "invalid path", http.StatusBadRequest)
 		return
 	}
@@ -176,6 +185,7 @@ func accessError(response http.ResponseWriter, err error) {
 		http.Error(response, "access denied", http.StatusForbidden)
 		return
 	}
+	log.Printf("workspace access error: %v", err)
 	http.Error(response, "workspace access unavailable", http.StatusServiceUnavailable)
 }
 
@@ -213,6 +223,7 @@ func (proxy *Proxy) forward(response http.ResponseWriter, request *http.Request,
 			}
 		},
 		ErrorHandler: func(response http.ResponseWriter, request *http.Request, err error) {
+			log.Printf("upstream proxy error for %s %s -> %s: %v", request.Method, request.URL.Path, target.String(), err)
 			http.Error(response, "upstream unavailable", http.StatusBadGateway)
 		},
 	}

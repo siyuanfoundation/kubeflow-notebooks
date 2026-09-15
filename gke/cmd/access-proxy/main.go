@@ -33,6 +33,30 @@ func lifetimeEnvironment(name string) int64 {
 	return seconds
 }
 
+func floatEnvironment(name string, defaultVal float64) float64 {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultVal
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
+		log.Fatalf("%s must be a positive float", name)
+	}
+	return parsed
+}
+
+func intEnvironment(name string, defaultVal int) int {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultVal
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		log.Fatalf("%s must be a positive integer", name)
+	}
+	return parsed
+}
+
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address; TLS terminates at the GKE load balancer")
 	audience := flag.String("iap-audience", os.Getenv("IAP_AUDIENCE"), "Exact IAP signed assertion audience")
@@ -43,6 +67,8 @@ func main() {
 	frontendURL := flag.String("frontend-url", os.Getenv("FRONTEND_URL"), "Internal frontend HTTP origin")
 	backendURL := flag.String("backend-url", os.Getenv("BACKEND_URL"), "Internal backend HTTP origin")
 	tenants := flag.String("tenants", os.Getenv("TENANT_NAMESPACES"), "Comma-separated managed tenant namespaces")
+	kubeQPS := flag.Float64("kube-qps", floatEnvironment("KUBE_CLIENT_QPS", 100), "Kubernetes API client rate-limiter QPS (default 100)")
+	kubeBurst := flag.Int("kube-burst", intEnvironment("KUBE_CLIENT_BURST", 200), "Kubernetes API client rate-limiter burst (default 200)")
 	kubeconfig := flag.String("kubeconfig", "", "Optional kubeconfig for local testing; defaults to in-cluster credentials")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -63,6 +89,8 @@ func main() {
 		log.Fatal(err)
 	}
 	config.Timeout = 10 * time.Second
+	config.QPS = float32(*kubeQPS)
+	config.Burst = *kubeBurst
 	managed := strings.Split(*tenants, ",")
 	for index := range managed {
 		managed[index] = strings.TrimSpace(managed[index])
@@ -82,7 +110,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Addr: *listen, Handler: proxy, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}
+	server := &http.Server{Addr: *listen, Handler: proxy, ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 650 * time.Second, MaxHeaderBytes: 64 << 10}
 	var desktopServer *http.Server
 	if *desktopURL != "" {
 		if parse(*desktopURL).Host == parse(*publicURL).Host {
@@ -92,7 +120,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		desktopServer = &http.Server{Addr: ":8081", Handler: proxy.EnableConnections(connections), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+		desktopServer = &http.Server{Addr: ":8081", Handler: proxy.EnableConnections(connections), ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 650 * time.Second, MaxHeaderBytes: 16 << 10}
 		go connections.Cleanup(ctx)
 		go func() {
 			if err := desktopServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
