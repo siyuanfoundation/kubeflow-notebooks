@@ -1,22 +1,21 @@
-# Notebooks on GKE
+# Standalone Kubeflow Notebooks on GKE (No Istio)
 
-Start with the [customer setup guide](USER_GUIDE.md) for installation in your own
-project. The [codelab](CODELAB.md) retains the maintainers' deployment history.
-[DESIGN.md](DESIGN.md) explains why this approach was chosen, its trade-offs, and
-how both access paths work.
-Browser JupyterLab works for the trusted pilot. An optional separate desktop
-endpoint now supports Kubernetes-minted connection tokens for the standard VS Code
-Jupyter extension; see [desktop setup and validation](USER_GUIDE.md#vs-code-jupyter-extension).
-The browser-host URL still requires IAP and is not a Jupyter token endpoint.
+This directory contains the standalone deployment and access integration for **Kubeflow Workspaces (Notebooks v2)**, **Kubeflow Trainer (v2)**, and **Kubeflow Spark Operator** on Google Kubernetes Engine (GKE) **without depending on Istio**.
 
-Status (2026-09-12): a trusted single-user pilot works on GKE without Istio, using
-managed Gateway, ACTIVE public TLS, IAP with custom OAuth, and the access proxy.
-Browser login, tenant discovery, notebook creation, kernel/terminal WebSockets,
-file persistence across pause/resume, and selected authorization/isolation checks
-passed. Production and multi-tenant security gates remain open. See the
-[codelab acceptance record](CODELAB.md#2026-09-12-working-single-user-pilot)
-for evidence and known UI/lifecycle gaps. No supported deployment is provided.
-The first milestone is secure end-to-end notebook access, not accelerators.
+## Documentation & Quickstart Guide
+
+| Document | Purpose |
+| --- | --- |
+| **[USER_GUIDE.md](USER_GUIDE.md)** | **Step-by-Step Deployment Guide**: Complete manual & automated instructions with configuration options (custom domain vs. automatic `sslip.io` zero-DNS setup, Google-managed OAuth vs. custom OAuth), Kubeflow Trainer + Spark Operator installation, and running [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb). |
+| **[CODELAB.md](CODELAB.md)** | **Automated Quickstart & Pilot Record**: 5-step quickstart using the automation scripts (`deploy_standalone.sh`, `build_jupyterlab.sh`, `cleanup_standalone.sh`) plus the historical maintainer acceptance test record. |
+| **[DESIGN.md](DESIGN.md)** | **Architecture & Design**: Explains why this Istio-free approach was chosen, how the access proxy and signed IAP assertions work, and how browser and VS Code desktop endpoints are isolated. |
+
+### Streamlined Automation Scripts
+- **[`deploy_standalone.sh`](deploy_standalone.sh)**: End-to-end deployment script that enables GKE APIs and standard Gateway API, installs `cert-manager`, builds/pushes core images, configures Google Certificate Manager (with automatic `sslip.io` fallback when no domain is provided), discovers the IAP backend audience, deploys Kubeflow Trainer (v2) and Kubeflow Spark Operator, configures tenant RBAC and baseline Pod Security, and sets up GCS Workload Identity IAM bindings.
+- **[`build_jupyterlab.sh`](build_jupyterlab.sh)**: Builds and pushes custom JupyterLab (CPU, GPU, TPU) and Spark 4.0.1 images (pre-bundled with `examples/distributed_tpu_example.ipynb`, `jax[tpu]`, `kubeflow[spark]`, and `google-cloud-storage`) and registers the `jupyterlab` `WorkspaceKind` and GPU/TPU `ComputeClasses`.
+- **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Tears down deployed tenant workloads, controllers, and optional edge resources.
+
+Browser JupyterLab works out-of-the-box with Google IAP authentication. An optional separate desktop endpoint supports Kubernetes-minted connection tokens for the standard VS Code Jupyter extension; see [VS Code Jupyter Extension](USER_GUIDE.md#7-vs-code-jupyter-extension-desktop-endpoint).
 
 ## Integration boundary
 
