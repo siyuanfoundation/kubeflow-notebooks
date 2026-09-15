@@ -54,6 +54,10 @@ export BUILD_IMAGES="${BUILD_IMAGES:-true}"
 # Optional: Build custom JupyterLab (CPU/GPU/TPU) and Spark images for distributed_tpu_example.ipynb
 export BUILD_JUPYTERLAB_IMAGES="${BUILD_JUPYTERLAB_IMAGES:-true}"
 
+# Optional: Kubernetes client QPS & Burst for gke-access-proxy
+export KUBE_CLIENT_QPS="${KUBE_CLIENT_QPS:-100}"
+export KUBE_CLIENT_BURST="${KUBE_CLIENT_BURST:-200}"
+
 # GCS Bucket for distributed_tpu_example.ipynb
 export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
 
@@ -228,6 +232,39 @@ if ! gcloud certificate-manager maps entries describe notebooks --map="${CERTIFI
     --hostname="${NOTEBOOK_HOST}" --project="${PROJECT}"
 fi
 
+# Ensure a GKE-node-tagged firewall rule exists for Google Cloud Load Balancer
+# health checks and Google Front Ends (35.191.0.0/16, 130.211.0.0/22).
+# In Google-internal GCP projects, GCE Enforcer (gceenforcer-enforcer@system.gserviceaccount.com)
+# deletes the untagged gkegw1-*-l7-default-global rule every 5 minutes because it
+# lacks targetTags, causing periodic 503 failed_to_pick_backend errors in JupyterLab.
+# A rule named gke-*-gclb-hc with --target-tags=<gke-node-tag> is exempted by GCE Enforcer.
+FIRST_NODE=$(kubectl --context="${CONTEXT}" get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [[ -n "${FIRST_NODE}" ]]; then
+  FIRST_NODE_ZONE=$(kubectl --context="${CONTEXT}" get node "${FIRST_NODE}" \
+    -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
+  GKE_NODE_TAG=$(gcloud compute instances describe "${FIRST_NODE}" \
+    --zone="${FIRST_NODE_ZONE}" --project="${PROJECT}" \
+    --format='value(tags.items)' 2>/dev/null | tr ';' '\n' | grep -E '^gke-.*-node$' | head -n1 || true)
+  CLUSTER_NETWORK=$(gcloud container clusters describe "${CLUSTER}" \
+    --location="${LOCATION}" --project="${PROJECT}" \
+    --format='value(network)' 2>/dev/null || echo "default")
+  if [[ -n "${GKE_NODE_TAG}" ]]; then
+    GCLB_FW_NAME="${GKE_NODE_TAG%-node}-gclb-hc"
+    if ! gcloud compute firewall-rules describe "${GCLB_FW_NAME}" --project="${PROJECT}" >/dev/null 2>&1; then
+      echo "Creating GKE-node-tagged firewall rule '${GCLB_FW_NAME}' (target tag: ${GKE_NODE_TAG}) for GCLB health checks..."
+      gcloud compute firewall-rules create "${GCLB_FW_NAME}" \
+        --project="${PROJECT}" \
+        --network="${CLUSTER_NETWORK}" \
+        --target-tags="${GKE_NODE_TAG}" \
+        --allow=tcp:8080,tcp:8081 \
+        --source-ranges=35.191.0.0/16,130.211.0.0/22 \
+        --description='{"kubernetes.io/cluster-id":"'"${CLUSTER}"'","purpose":"allow-gclb-health-checks-and-gfe"}'
+    else
+      echo "GKE-node-tagged firewall rule '${GCLB_FW_NAME}' already exists."
+    fi
+  fi
+fi
+
 # ==============================================================================
 # Step 5: Render & Apply Standalone Kubeflow Workspaces (Fail-Closed Bootstrap)
 # ==============================================================================
@@ -266,13 +303,15 @@ jq -n \
   --arg client "${IAP_CLIENT_ID}" \
   --arg secret "${IAP_SECRET_NAME}" \
   --arg tenant "${TENANT_NAMESPACE}" \
+  --argjson qps "${KUBE_CLIENT_QPS}" \
+  --argjson burst "${KUBE_CLIENT_BURST}" \
   --arg proxy "${PROXY_IMAGE}" \
   --arg frontend "${FRONTEND_IMAGE}" \
   --arg controller "${CONTROLLER_IMAGE}" \
   --arg backend "${BACKEND_IMAGE}" \
   '{controlPlaneCIDR:$cidr,hostname:$host,certificateMap:$certificateMap,
     addressName:$addressName,iapClientID:$client,iapSecretName:$secret,
-    iapAudience:"",tenants:[$tenant],
+    iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,tenants:[$tenant],
     images:{proxy:$proxy,frontend:$frontend,controller:$controller,backend:$backend}}' \
   > "${SCRIPT_DIR}/deployment.local.json"
 

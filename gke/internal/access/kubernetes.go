@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"sync"
+	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -25,11 +27,34 @@ const workspaceLabel = "notebooks.kubeflow.org/workspace-name"
 var workspaceResource = schema.GroupVersionResource{Group: "kubeflow.org", Version: "v1beta1", Resource: "workspaces"}
 var kindResource = schema.GroupVersionResource{Group: "kubeflow.org", Version: "v1beta1", Resource: "workspacekinds"}
 
+type resolveCacheKey struct {
+	email     string
+	namespace string
+	name      string
+	portID    string
+}
+
+type resolveCacheEntry struct {
+	target     Target
+	expiresAt  time.Time
+	staleUntil time.Time
+}
+
+type resolveCall struct {
+	wg     sync.WaitGroup
+	target Target
+	err    error
+}
+
 type KubernetesAccess struct {
 	core          coreclient.CoreV1Interface
 	authorization authorizationclient.AuthorizationV1Interface
 	resources     dynamic.Interface
 	tenants       map[string]bool
+	cacheMu       sync.RWMutex
+	cache         map[resolveCacheKey]resolveCacheEntry
+	inflight      map[resolveCacheKey]*resolveCall
+	cacheTTL      time.Duration
 }
 
 func NewKubernetesAccess(config *rest.Config, tenants []string) (*KubernetesAccess, error) {
@@ -55,7 +80,15 @@ func NewKubernetesAccess(config *rest.Config, tenants []string) (*KubernetesAcce
 	if err != nil {
 		return nil, err
 	}
-	return &KubernetesAccess{core: core, authorization: authorization, resources: resources, tenants: managed}, nil
+	return &KubernetesAccess{
+		core:          core,
+		authorization: authorization,
+		resources:     resources,
+		tenants:       managed,
+		cache:         make(map[resolveCacheKey]resolveCacheEntry),
+		inflight:      make(map[resolveCacheKey]*resolveCall),
+		cacheTTL:      30 * time.Second,
+	}, nil
 }
 
 func (access *KubernetesAccess) allowed(ctx context.Context, identity Identity, namespace, verb, name string) (bool, error) {
@@ -97,6 +130,69 @@ func (access *KubernetesAccess) Namespaces(ctx context.Context, identity Identit
 }
 
 func (access *KubernetesAccess) Resolve(ctx context.Context, identity Identity, namespace, name, portID string) (Target, error) {
+	cacheKey := resolveCacheKey{email: identity.Email, namespace: namespace, name: name, portID: portID}
+	if access.cacheTTL > 0 {
+		now := time.Now()
+		access.cacheMu.RLock()
+		entry, ok := access.cache[cacheKey]
+		access.cacheMu.RUnlock()
+		if ok {
+			if now.Before(entry.expiresAt) {
+				return entry.target, nil
+			}
+			if now.Before(entry.staleUntil) {
+				go func() {
+					bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_, _ = access.doResolve(bgCtx, cacheKey, identity, namespace, name, portID)
+				}()
+				return entry.target, nil
+			}
+		}
+		return access.doResolve(ctx, cacheKey, identity, namespace, name, portID)
+	}
+	return access.resolveUncached(ctx, identity, namespace, name, portID)
+}
+
+func (access *KubernetesAccess) doResolve(ctx context.Context, cacheKey resolveCacheKey, identity Identity, namespace, name, portID string) (Target, error) {
+	access.cacheMu.Lock()
+	if access.inflight == nil {
+		access.inflight = make(map[resolveCacheKey]*resolveCall)
+	}
+	if call, ok := access.inflight[cacheKey]; ok {
+		access.cacheMu.Unlock()
+		call.wg.Wait()
+		return call.target, call.err
+	}
+	call := &resolveCall{}
+	call.wg.Add(1)
+	access.inflight[cacheKey] = call
+	access.cacheMu.Unlock()
+
+	target, err := access.resolveUncached(ctx, identity, namespace, name, portID)
+
+	access.cacheMu.Lock()
+	delete(access.inflight, cacheKey)
+	if err == nil {
+		now := time.Now()
+		if access.cache == nil {
+			access.cache = make(map[resolveCacheKey]resolveCacheEntry)
+		}
+		access.cache[cacheKey] = resolveCacheEntry{
+			target:     target,
+			expiresAt:  now.Add(access.cacheTTL),
+			staleUntil: now.Add(access.cacheTTL * 10),
+		}
+	}
+	call.target = target
+	call.err = err
+	call.wg.Done()
+	access.cacheMu.Unlock()
+
+	return target, err
+}
+
+func (access *KubernetesAccess) resolveUncached(ctx context.Context, identity Identity, namespace, name, portID string) (Target, error) {
 	allowed, err := access.allowed(ctx, identity, namespace, "get", name)
 	if err != nil {
 		return Target{}, err
