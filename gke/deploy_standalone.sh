@@ -37,6 +37,7 @@ fi
 # Optional: Custom domain (e.g., "notebooks.example.com").
 # If unset or empty, defaults automatically to "notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io" (zero DNS setup required).
 export NOTEBOOK_HOST="${NOTEBOOK_HOST:-}"
+export DESKTOP_HOST="${DESKTOP_HOST:-}"
 
 # Optional: OAuth configuration
 # Leave IAP_CLIENT_ID and IAP_SECRET_NAME empty for Google-managed OAuth (internal organization users).
@@ -217,9 +218,23 @@ else
   echo "Ensure your DNS A record maps ${NOTEBOOK_HOST} -> ${ADDRESS}"
 fi
 
+if [[ -z "${DESKTOP_HOST}" ]]; then
+  export DESKTOP_HOST="connect.${ADDRESS}.sslip.io"
+  echo "No DESKTOP_HOST specified. Automatically using sslip.io domain: ${DESKTOP_HOST}"
+else
+  echo "Using custom DESKTOP_HOST: ${DESKTOP_HOST}"
+  echo "Ensure your DNS A record maps ${DESKTOP_HOST} -> ${ADDRESS}"
+fi
+
 if ! gcloud certificate-manager certificates describe "${CERTIFICATE_NAME}" --project="${PROJECT}" >/dev/null 2>&1; then
   gcloud certificate-manager certificates create "${CERTIFICATE_NAME}" \
     --domains="${NOTEBOOK_HOST}" --project="${PROJECT}"
+fi
+
+DESKTOP_CERTIFICATE="${CERTIFICATE_NAME}-desktop"
+if ! gcloud certificate-manager certificates describe "${DESKTOP_CERTIFICATE}" --project="${PROJECT}" >/dev/null 2>&1; then
+  gcloud certificate-manager certificates create "${DESKTOP_CERTIFICATE}" \
+    --domains="${DESKTOP_HOST}" --project="${PROJECT}"
 fi
 
 if ! gcloud certificate-manager maps describe "${CERTIFICATE_MAP}" --project="${PROJECT}" >/dev/null 2>&1; then
@@ -230,6 +245,12 @@ if ! gcloud certificate-manager maps entries describe notebooks --map="${CERTIFI
   gcloud certificate-manager maps entries create notebooks \
     --map="${CERTIFICATE_MAP}" --certificates="${CERTIFICATE_NAME}" \
     --hostname="${NOTEBOOK_HOST}" --project="${PROJECT}"
+fi
+
+if ! gcloud certificate-manager maps entries describe notebooks-desktop --map="${CERTIFICATE_MAP}" --project="${PROJECT}" >/dev/null 2>&1; then
+  gcloud certificate-manager maps entries create notebooks-desktop \
+    --map="${CERTIFICATE_MAP}" --certificates="${DESKTOP_CERTIFICATE}" \
+    --hostname="${DESKTOP_HOST}" --project="${PROJECT}"
 fi
 
 # Ensure a GKE-node-tagged firewall rule exists for Google Cloud Load Balancer
@@ -298,6 +319,7 @@ BACKEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-backend
 jq -n \
   --arg cidr "${CONTROL_PLANE_CIDR}" \
   --arg host "${NOTEBOOK_HOST}" \
+  --arg desktopHost "${DESKTOP_HOST}" \
   --arg certificateMap "${CERTIFICATE_MAP}" \
   --arg addressName "${ADDRESS_NAME}" \
   --arg client "${IAP_CLIENT_ID}" \
@@ -309,7 +331,7 @@ jq -n \
   --arg frontend "${FRONTEND_IMAGE}" \
   --arg controller "${CONTROLLER_IMAGE}" \
   --arg backend "${BACKEND_IMAGE}" \
-  '{controlPlaneCIDR:$cidr,hostname:$host,certificateMap:$certificateMap,
+  '{controlPlaneCIDR:$cidr,hostname:$host,desktopHostname:$desktopHost,certificateMap:$certificateMap,
     addressName:$addressName,iapClientID:$client,iapSecretName:$secret,
     iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,tenants:[$tenant],
     images:{proxy:$proxy,frontend:$frontend,controller:$controller,backend:$backend}}' \
@@ -499,12 +521,14 @@ echo "=================================================================="
 echo "✅ Standalone Kubeflow Workspaces Deployment Complete!"
 echo "=================================================================="
 echo "  Public HTTPS URL:  https://${NOTEBOOK_HOST}/workspaces/"
+echo "  VS Code Tokens:    https://${NOTEBOOK_HOST}/workspaces/connections"
+echo "  Desktop Endpoint:  https://${DESKTOP_HOST}/"
 echo "  Admitted Users:    ${PILOT_USERS}"
 echo "  Tenant Namespace:  ${TENANT_NAMESPACE}"
 echo "  GCS Bucket:        gs://${GCS_BUCKET}"
 echo ""
-echo "Note: Certificate Manager certificate '${CERTIFICATE_NAME}' uses Load Balancer"
+echo "Note: Certificate Manager certificates '${CERTIFICATE_NAME}' and '${CERTIFICATE_NAME}-desktop' use Load Balancer"
 echo "authorization and may take 5-15 minutes after Gateway attachment to reach ACTIVE state."
 echo "Check certificate status with:"
-echo "  gcloud certificate-manager certificates describe ${CERTIFICATE_NAME} --project=${PROJECT} --format='yaml(managed)'"
+echo "  gcloud certificate-manager certificates list --project=${PROJECT}"
 echo "=================================================================="

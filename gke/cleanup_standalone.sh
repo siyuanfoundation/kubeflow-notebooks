@@ -52,12 +52,15 @@ fi
 
 kubectl --context="${CONTEXT}" delete validatingadmissionpolicybinding notebooks-gke-pilot-workspaces --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete validatingadmissionpolicy notebooks-gke-pilot-workspaces --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete namespace notebooks-connections --ignore-not-found || true
 
 if [[ "${DELETE_EDGE_RESOURCES}" == "true" ]]; then
   echo "Deleting Certificate Manager certificate map and Global IP (${ADDRESS_NAME})..."
   gcloud certificate-manager maps entries delete notebooks --map="${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
+  gcloud certificate-manager maps entries delete notebooks-desktop --map="${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
   gcloud certificate-manager maps delete "${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
   gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}" --project="${PROJECT}" --quiet || true
+  gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}-desktop" --project="${PROJECT}" --quiet || true
   gcloud compute addresses delete "${ADDRESS_NAME}" --global --project="${PROJECT}" --quiet || true
 fi
 
