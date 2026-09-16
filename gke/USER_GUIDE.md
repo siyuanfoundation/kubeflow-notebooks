@@ -59,6 +59,7 @@ export REGION="us-central1"       # Region for Artifact Registry and GCS bucket
 gcloud container clusters create "${CLUSTER}" \
   --project="${PROJECT}" \
   --location="${LOCATION}" \
+  --enable-pod-snapshots `# Required for Pause & Resume` \
   --enable-dataplane-v2 `# Required: Enforces Kubernetes NetworkPolicies` \
   --gateway-api=standard `# Required: Enables GKE Gateway API controller` \
   --workload-pool="${PROJECT}.svc.id.goog" `# Required: Enables Workload Identity for GCS access` \
@@ -73,6 +74,8 @@ gcloud container node-pools create cpu-autoscaling-pool \
   --cluster="${CLUSTER}" \
   --project="${PROJECT}" \
   --location="${LOCATION}" \
+  --image-type=cos_containerd `# Required for Pause & Resume` \
+  --sandbox type=gvisor `# Required for Pause & Resume` \
   --machine-type=e2-standard-4 \
   --enable-autoscaling \
   --min-nodes=0 \
