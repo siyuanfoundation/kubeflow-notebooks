@@ -7,7 +7,7 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 - **Google Certificate Manager**: Automated public TLS certificates using Load Balancer Authorization.
 - **Identity-Aware Proxy (IAP)**: Google authentication and identity assertion at the edge.
 - **GKE Access Proxy (`gke-access-proxy`)**: Validates signed IAP JWT assertions, enforces per-request Kubernetes `SubjectAccessReview` RBAC checks, routes HTTP and WebSocket connections to workspaces, and supports optional Kubernetes-minted connection tokens for the VS Code Jupyter extension.
-- **Kubernetes NetworkPolicy**: Strictly protects Workspace pods (`gke-tenant-ingress`) so **only `gke-access-proxy` and `workspaces-controller` can reach Workspace pods** (no direct pod-to-pod access to notebooks), while a separate scoped policy (`gke-tenant-workloads-ingress` excluding `notebooks.kubeflow.org/workspace-name`) allows non-workspace workload pods in `team-a` (Spark driver/executors, multi-host TPU `TrainJob` hosts, and inference pods) to communicate within `team-a`.
+- **Kubernetes NetworkPolicy**: Strictly protects Workspace pods (`gke-tenant-ingress`) so **only `gke-access-proxy` and `workspaces-controller` can reach Workspace pods** (no direct pod-to-pod access to notebooks), while a separate scoped policy (`gke-tenant-workloads-ingress` excluding `notebooks.kubeflow.org/workspace-name`) allows non-workspace workload pods in `${TENANT_NAMESPACE}` (Spark driver/executors, multi-host TPU `TrainJob` hosts, and inference pods) to communicate within `${TENANT_NAMESPACE}`.
 
 ---
 
@@ -90,7 +90,7 @@ export CLUSTER="kubeflow-notebooks"
 export LOCATION="us-central1-c"
 export REGION="us-central1"
 export PILOT_USERS="user1@example.com,user2@example.com" # Comma- or space-separated Google account emails of users
-export TENANT_NAMESPACE="team-a"                  # Tenant namespace for notebooks & jobs
+export TENANT_NAMESPACE="team-a"                  # Example tenant namespace for notebooks & jobs
 export REPOSITORY="notebooks"                     # Artifact Registry repository name
 export ADDRESS_NAME="notebooks-gke-global"        # Global static external IP name
 export CERTIFICATE_NAME="notebooks-gke"
@@ -520,7 +520,7 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
 
 ---
 
-### Step 5.4: Admit Users via IAP & Configure Tenant Workspace (`team-a`)
+### Step 5.4: Admit Users via IAP & Configure Tenant Workspace (`${TENANT_NAMESPACE}`)
 1. **Grant IAP Access to Your Users**:
    ```bash
    for user_email in $(echo "${PILOT_USERS}" | tr ',' ' '); do
@@ -598,7 +598,7 @@ The [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.
 All three stages share data shards, model checkpoints, and metrics via a **Google Cloud Storage (GCS) bucket** (`gs://${GCS_BUCKET}`).
 
 ### Step 6.1: Provision GCS Bucket & Grant Workload Identity IAM Access
-Because Workload Identity Federation (`--workload-pool=${PROJECT}.svc.id.goog`) is enabled on the cluster, you can grant GCS bucket access directly to all ServiceAccounts in `${TENANT_NAMESPACE}` (`team-a`) without managing service account keys:
+Because Workload Identity Federation (`--workload-pool=${PROJECT}.svc.id.goog`) is enabled on the cluster, you can grant GCS bucket access directly to all ServiceAccounts in `${TENANT_NAMESPACE}` without managing service account keys:
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
@@ -608,7 +608,7 @@ gcloud storage buckets create "gs://${GCS_BUCKET}" \
   --location="${REGION}" \
   --project="${PROJECT}" || true
 
-# 2. Grant roles/storage.objectUser to all pods/ServiceAccounts in namespace team-a
+# 2. Grant roles/storage.objectUser to all pods/ServiceAccounts in ${TENANT_NAMESPACE}
 #    (covers the workspace pod, Spark driver/executors, TPU TrainJob hosts, and inference pods)
 gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
   --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
@@ -617,7 +617,7 @@ gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
 
 ### Step 6.2: Create & Connect to Your Workspace
 1. Open `https://${NOTEBOOK_HOST}/workspaces/` in your browser and sign in with one of the Google accounts in `${PILOT_USERS}`.
-2. Select tenant namespace **`team-a`** from the namespace dropdown.
+2. Select your tenant namespace (**`${TENANT_NAMESPACE}`**) from the namespace dropdown.
 3. Click **Create workspace**:
    - **Workspace Kind**: Choose **JupyterLab Notebook** (`jupyterlab`)
    - **Image**: Choose **jupyterlab (CPU)** (`jupyterlab-cpu`, pre-loaded with `kubeflow[spark]`, `kubeflow-trainer`, `google-cloud-storage`, and `examples/distributed_tpu_example.ipynb`)
@@ -629,17 +629,17 @@ gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
 Inside JupyterLab, open `distributed_tpu_example.ipynb` (located in `/home/jovyan/demo/distributed_tpu_example.ipynb` or upload [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb) together with [`examples/jobs/`](examples/jobs/)) and run the cells in sequence:
 
 1. **Cell 0 (Setup & RBAC Check)**:
-   Confirms in-cluster ServiceAccount credentials and verifies `can-i create` permissions in `team-a` for `trainjobs.trainer.kubeflow.org`, `sparkconnects.sparkoperator.k8s.io`, `sparkapplications.sparkoperator.k8s.io`, and `deployments.apps`.
+   Confirms in-cluster ServiceAccount credentials and verifies `can-i create` permissions in `${TENANT_NAMESPACE}` for `trainjobs.trainer.kubeflow.org`, `sparkconnects.sparkoperator.k8s.io`, `sparkapplications.sparkoperator.k8s.io`, and `deployments.apps`.
 2. **Stage 1 (Distributed Data Processing with Apache Spark)**:
    Runs `pipeline.run_data_processing(num_executors=4, num_shards=4, wait=True)`.
-   - Spins up a `SparkConnect` cluster (1 driver + 4 executor pods) in `team-a`.
+   - Spins up a `SparkConnect` cluster (1 driver + 4 executor pods) in `${TENANT_NAMESPACE}`.
    - Processes 60,000 Fashion-MNIST images in parallel and writes compressed `.npz` shards to `gs://${GCS_BUCKET}/processed/train/`.
 3. **Stage 2 (Multi-Host Cloud TPU Training with Kubeflow Trainer)**:
    Runs `pipeline.run_training(num_hosts=2, epochs=5, global_batch_size=1024, wait=True)`.
    - Submits a `TrainJob` using the `jax-distributed` runtime on 2 Cloud TPU v5e hosts (`cloud.google.com/compute-class: tpu-v5-8-multi-host`, 8 TPU cores total).
    - Trains a 3-layer MLP with `jax.pmap` across all 8 TPU cores and writes model parameters and `metrics.json` to `gs://${GCS_BUCKET}/model/`.
 4. **Stage 3 (CPU Model Serving & Inference)**:
-   Deploys the 2-replica `fashion-mnist-inference` `Deployment` and `Service` in `team-a` and sends live HTTP prediction requests to `http://fashion-mnist-inference:8080/predict`.
+   Deploys the 2-replica `fashion-mnist-inference` `Deployment` and `Service` in `${TENANT_NAMESPACE}` and sends live HTTP prediction requests to `http://fashion-mnist-inference:8080/predict`.
 5. **Stage 4 (Pause & Resume Workspace)**:
    Demonstrates pausing the workspace from the Kubeflow Workspaces UI to release compute resources while preserving persistent files on the GKE Persistent Disk (`notebooks-gke-rwo`), and resuming the workspace when ready.
 
@@ -686,6 +686,15 @@ kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/
 3. In VS Code, open any `.ipynb` notebook and select **Select Kernel > Select Another Kernel > Existing Jupyter Server**, then paste the copied URL (including `?token=`).
 4. When finished, click **Revoke** on the connection page to immediately terminate active desktop WebSockets and invalidate the token.
 
+On macOS, if VS Code fails with `unable to get issuer certificate` for a valid
+Google Certificate Manager certificate, set `"http.systemCertificatesNode": true`
+in VS Code user settings (`settings.json`) and reload the window. This avoids
+VS Code's legacy Keychain certificate loader (`/usr/bin/security find-certificate`)
+injecting the cross-signed `GTS Root R1` intermediate (`Issuer: GlobalSign Root CA`)
+from `/Library/Keychains/System.keychain` without `GlobalSign Root CA`, which
+causes OpenSSL's certificate store to shadow the built-in self-signed `GTS Root R1`
+root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TLS.
+
 ---
 
 ## 8. Enrolling Additional Users
@@ -698,7 +707,7 @@ IAP admission and Kubernetes RBAC are configured as independent layers:
      --resource-type=backend-services --service="${BACKEND_SERVICE}" \
      --member="user:${NEW_USER}" --role=roles/iap.httpsResourceAccessor --condition=None
    ```
-2. **Grant Kubernetes RBAC in Tenant Namespace (`team-a`)**:
+2. **Grant Kubernetes RBAC in Tenant Namespace (`${TENANT_NAMESPACE}`)**:
    ```bash
    kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" patch rolebinding notebooks-gke-pilot --type=json \
      -p '[{"op":"add","path":"/subjects/-","value":{"kind":"User","apiGroup":"rbac.authorization.k8s.io","name":"'"${NEW_USER}"'"}}]'
@@ -727,8 +736,51 @@ DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.sh
 | Symptom | Resolution |
 | --- | --- |
 | `kubectl get gatewayclasses` shows no `gke-l7-global-external-managed` | Ensure you ran `gcloud container clusters update "$CLUSTER" --location="$LOCATION" --gateway-api=standard` first (Section 2.2). |
-| Google login succeeds but IAP returns `Access Denied` | Verify `gcloud iap web add-iam-policy-binding` was granted on `--service="${BACKEND_SERVICE}"` and that external users are added to Google Auth Platform Test Users if using Custom OAuth. |
-| Certificate Manager status stays `PROVISIONING` | Ensure the Gateway is `Programmed`, `NOTEBOOK_HOST` resolves to `${ADDRESS}`, and wait 5–15 minutes for Load Balancer Authorization. |
+| Google login succeeds but IAP returns `Access Denied` | Verify `gcloud iap web add-iam-policy-binding` was granted on `--service="${BACKEND_SERVICE}"`, organization membership for managed OAuth, and that external users are added to Google Auth Platform Test Users if using Custom OAuth; do not broaden IAM blindly. |
+| OAuth redirect mismatch | Ensure the exact `https://iap.googleapis.com/v1/oauth/clientIds/CLIENT_ID:handleRedirect` callback URI is registered on this OAuth client ID. |
+| Certificate Manager status stays `PROVISIONING` | Ensure the Gateway is `Programmed`, `NOTEBOOK_HOST` resolves to `${ADDRESS}`, the certificate map is attached, and wait 5–15 minutes for Load Balancer Authorization. |
 | `gke-access-proxy` CrashLoopBackOff during Step 5.1 | Expected fail-closed bootstrap behavior before `IAP_AUDIENCE` is configured in Step 5.2. |
-| Spark or TPU pods fail to create in `team-a` | Verify `gke/manifests/pilot/access.yaml` has been applied (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
+| Webhook admission times out | Verify `CONTROL_PLANE_CIDR` and Konnectivity-agent TCP 9443 allowance in the isolation plan; certificate readiness alone does not prove connectivity. |
+| No namespace appears in the Workspaces UI | The verified email needs `list workspaces` in `${TENANT_NAMESPACE}`; IAP access alone does not grant Kubernetes RBAC. |
+| Storage classes are disabled | Use the dedicated StorageClass (`notebooks-gke-rwo`) labeled with `notebooks.kubeflow.org/can-use=true`. |
+| Notebook remains `Pending` | Check node resources, image pull permissions, PVC provisioning, quota, Pod Security, and pod events. |
+| Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update. |
+| Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |
+| VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
+| Spark or TPU pods fail to create in `${TENANT_NAMESPACE}` | Verify `gke/manifests/pilot/access.yaml` has been applied to `${TENANT_NAMESPACE}` (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
 | GCS permission denied (`403`) during Spark ETL or TPU training | Verify Workload Identity IAM binding on `gs://${GCS_BUCKET}` for `principalSet://.../namespace/${TENANT_NAMESPACE}` (Section 6.1). |
+
+Inspect conditions and error messages without printing Secrets, access tokens,
+OAuth state values, or cookies. Keep notebook data when investigating failures.
+
+---
+
+## 11. Security and Operational Limits
+
+The pilot has verified browser login, kernel and terminal WebSockets, file
+persistence across pause/resume, selected cross-tenant/forged-header denials,
+admission/RBAC restrictions, and direct ingress isolation from an unrelated pod.
+Repeat these positive and negative checks in each customer's environment; the
+maintainers' test is not a certification of your deployment.
+
+Notebook HTML/JavaScript shares an origin with the application API. Do not invite
+untrusted users on the assumption that origin checks isolate their content.
+Namespace-wide permissions also imply trust among users sharing a namespace.
+Student enrollment, per-user namespaces, Google group-to-RBAC synchronization,
+and non-Google federation are not implemented by this single-user guide.
+
+RBAC is checked on each request/WebSocket handshake; existing WebSockets are not
+terminated on revocation. Live revocation, deletion/recreation races, broad
+filename/encoding compatibility, automatic culling, upgrades, and uninstall need
+further validation. Review images and dependencies before wider use.
+
+For upgrades, retain previous configuration/plans, build new pinned images, review
+the newly rendered resources, and repeat acceptance tests. Never reapply a stale
+isolation plan that removes the Konnectivity allowance. Preserve PVCs.
+
+For removal, first back up files and inventory ownership. Remove the single
+backend's IAP grant, then the dedicated HTTPRoute/Gateway, and wait for GKE to
+remove its load balancer. Delete only installation-owned edge resources afterward.
+Do not delete shared cert-manager, the cluster, registry, CRDs, or tenant namespaces
+as automatic cleanup. Retain means notebook disks can survive PVC deletion and
+continue billing; release them only after explicit data-deletion approval.
