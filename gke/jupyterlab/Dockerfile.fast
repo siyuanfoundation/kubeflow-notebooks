@@ -3,7 +3,19 @@
 # Extends upstream ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0
 #
 
-ARG BASE_IMG=ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0
+# Pinned by digest, not just by tag. Upstream republishes v1.11.0 in place, and we have
+# caught it doing so: the TPU image was built from this same tag and carries pandas
+# 2.2.3 / matplotlib 3.10.0 / scipy 1.15.1, while the tag today resolves to pandas
+# 3.0.3 / matplotlib 3.10.9 / scipy 1.17.1. Two builds of this Dockerfile weeks apart
+# ship different stacks with no change on our side. The tag is kept alongside the
+# digest for readability only -- Docker resolves the digest and ignores it.
+#
+# This digest is what the deployed CPU image already runs, so pinning it is a no-op
+# today rather than an upgrade. To move up, pull the new tag, rebuild, confirm a CPU
+# Workspace starts, and update the digest here:
+#   docker buildx imagetools inspect \
+#     ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0
+ARG BASE_IMG=ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0@sha256:8f8a000b7eece82c7e874924dc45a3922e9197137eefe67f55c711cc3ce068fd
 FROM $BASE_IMG
 
 ARG TARGETARCH=amd64
