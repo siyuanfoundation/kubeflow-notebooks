@@ -3,7 +3,19 @@
 # Extends upstream ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0
 #
 
-ARG BASE_IMG=ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0
+# Pinned by digest, not just by tag. Upstream republishes v1.11.0 in place: the same
+# tag moved from torch 2.5.1+cu124 to torch 2.12.0+cu130, so two builds of this
+# Dockerfile months apart would hand users a different CUDA major version with no
+# change on our side. The tag is kept alongside the digest for readability only --
+# Docker resolves the digest and ignores it.
+#
+# This digest is the image the GPU examples were verified against: torch
+# 2.12.0+cu130, working on a T4 (driver 580.126.09) under the gVisor sandbox. To
+# move up, pull the new tag, re-run examples/gpu_checkpoint_restore_example.ipynb on
+# a GPU Workspace, and update the digest here:
+#   docker buildx imagetools inspect \
+#     ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0
+ARG BASE_IMG=ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0@sha256:55f6abbe52112317570b9cd10967bc8e4dc724eaff7030bc92d97a2e097dce84
 FROM $BASE_IMG
 
 ARG TARGETARCH=amd64
