@@ -579,6 +579,17 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
    TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
      envsubst < gke/jupyterlab/workspacekind.yaml | kubectl --context="${CONTEXT}" apply -f -
 
+   # Optionally register the resumable-only WorkspaceKind (CPU & GPU)
+   PROJECT_ID="${PROJECT}" \
+   REGION="${REGION}" \
+   REPO_NAME="${REPOSITORY}" \
+   IMAGE_NAME="jupyterlab" \
+   GCS_BUCKET="${GCS_BUCKET}" \
+   CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" \
+   GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" \
+   TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
+     envsubst < gke/jupyterlab/workspacekind-resumable.yaml | kubectl --context="${CONTEXT}" apply -f -
+
    kubectl --context="${CONTEXT}" apply -f gke/manifests/compute-classes/
    ```
 

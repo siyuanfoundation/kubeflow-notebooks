@@ -248,12 +248,13 @@ func (c *Controller) mutatePod(ctx context.Context, request *admissionv1.Admissi
 		namespace = pod.Namespace
 	}
 
-	// gVisor cannot host TPU devices, so TPU Workspaces are never snapshotted.
+	// gVisor cannot host TPU devices, so TPU Workspaces are never snapshotted. This
+	// mirrors podConfigRequestsTPU on the Workspace path; both key off ResourceTPU.
 	for _, container := range pod.Spec.Containers {
-		if _, hasTPU := container.Resources.Limits["google.com/tpu"]; hasTPU {
+		if _, hasTPU := container.Resources.Limits[ResourceTPU]; hasTPU {
 			return allow()
 		}
-		if _, hasTPU := container.Resources.Requests["google.com/tpu"]; hasTPU {
+		if _, hasTPU := container.Resources.Requests[ResourceTPU]; hasTPU {
 			return allow()
 		}
 	}

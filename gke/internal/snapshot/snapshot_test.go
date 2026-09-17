@@ -236,6 +236,77 @@ func TestMutatePodSkipsTPUWorkspaces(t *testing.T) {
 	}
 }
 
+// workspaceKindWithPodConfigs builds a WorkspaceKind whose podConfig values carry the
+// given resource limits, so enablement can be exercised against declared hardware.
+func workspaceKindWithPodConfigs(name string, annotations map[string]any, podConfigs map[string]map[string]any) *unstructured.Unstructured {
+	values := []any{}
+	for id, limits := range podConfigs {
+		values = append(values, map[string]any{
+			"id":   id,
+			"spec": map[string]any{"resources": map[string]any{"limits": limits}},
+		})
+	}
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "kubeflow.org/v1beta1",
+			"kind":       "WorkspaceKind",
+			"metadata":   map[string]any{"name": name, "annotations": annotations},
+			"spec": map[string]any{
+				"podTemplate": map[string]any{
+					"options": map[string]any{
+						"podConfig": map[string]any{"values": values},
+					},
+				},
+			},
+		},
+	}
+}
+
+// workspaceWithPodConfig is workspace() plus a selected podConfig id.
+func workspaceWithPodConfig(name string, annotations map[string]any, podConfigID string) *unstructured.Unstructured {
+	ws := workspace(name, annotations, false)
+	_ = unstructured.SetNestedField(ws.Object, podConfigID, "spec", "podTemplate", "options", "podConfig")
+	return ws
+}
+
+// Snapshot enablement must key off the hardware a podConfig declares, not off its
+// name. The previous implementation matched strings.Contains(id, "tpu"), so renaming
+// the podConfig silently re-enabled checkpointing on hardware that cannot do it.
+func TestSnapshotEnabledUsesPodConfigResourcesNotNames(t *testing.T) {
+	kind := workspaceKindWithPodConfigs("jupyterlab",
+		map[string]any{AnnotationEnabled: "true"},
+		map[string]map[string]any{
+			// Deliberately named without the substring "tpu".
+			"v5litepod":   {ResourceTPU: "4"},
+			"small_cpu":   {"cpu": "2", "memory": "4Gi"},
+			"tpu_in_name": {"cpu": "2", "memory": "4Gi"},
+		})
+
+	cases := []struct {
+		name        string
+		podConfig   string
+		annotations map[string]any
+		want        bool
+	}{
+		{"tpu hardware under a non-tpu name is excluded", "v5litepod", nil, false},
+		{"cpu podConfig is enabled by the kind", "small_cpu", nil, true},
+		{"a name containing tpu but no TPU resource is still enabled", "tpu_in_name", nil, true},
+		{"hardware beats an explicit opt-in", "v5litepod", map[string]any{AnnotationEnabled: "true"}, false},
+		{"explicit opt-out still wins", "small_cpu", map[string]any{AnnotationEnabled: "false"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, _, _ := newTestController(t, kind, workspaceWithPodConfig("ws", tc.annotations, tc.podConfig))
+			ws := workspaceWithPodConfig("ws", tc.annotations, tc.podConfig)
+			got, _ := controller.snapshotEnabled(context.Background(), ws)
+			if got != tc.want {
+				t.Fatalf("snapshotEnabled(podConfig=%q, annotations=%v) = %v, want %v",
+					tc.podConfig, tc.annotations, got, tc.want)
+			}
+		})
+	}
+}
+
 // While the socket settle grace period is running the reconciler must ask for a
 // delayed retry instead of creating the trigger, and it must not busy-poll.
 func TestReconcileWaitsForSocketSettleGracePeriod(t *testing.T) {

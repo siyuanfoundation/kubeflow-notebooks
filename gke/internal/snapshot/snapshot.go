@@ -56,6 +56,13 @@ const (
 	DefaultGKERuntimeClass     = "gvisor"
 	ReadinessGateConditionType = corev1.PodConditionType("podsnapshot.gke.kubeflow.org/active")
 
+	// ResourceTPU is the extended resource a Pod requests to get TPU chips. GKE
+	// checkpoints through gVisor, which cannot host TPU devices, so asking for this
+	// resource makes a workload un-snapshottable no matter what the annotations say.
+	// Both the Pod admission path and the Workspace enablement check key off this,
+	// so they cannot drift apart.
+	ResourceTPU = "google.com/tpu"
+
 	// LabelSnapshotTriggeredBy is set by GKE on every PodSnapshot, naming the
 	// PodSnapshotManualTrigger that produced it. It is the only handle we have on a
 	// Workspace's snapshots, because GKE forbids us from adding our own metadata.

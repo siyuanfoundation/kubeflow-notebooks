@@ -516,6 +516,14 @@ if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]]; then
     IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
     CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
     envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" | kubectl --context="${CONTEXT}" apply -f -
+
+  if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind-resumable.yaml" ]]; then
+    echo "Registering WorkspaceKind 'jupyterlab-resumable' (resumable CPU & GPU)..."
+    PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
+      IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
+      CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
+      envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind-resumable.yaml" | kubectl --context="${CONTEXT}" apply -f -
+  fi
 fi
 
 if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then

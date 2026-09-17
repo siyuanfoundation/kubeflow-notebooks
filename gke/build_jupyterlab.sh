@@ -58,7 +58,7 @@ Options:
   --variant <cpu|gpu|tpu|spark|all> Build specific variant or all 4 (default: all)
   --cloud-build                     Use Google Cloud Build (gcloud builds submit) instead of local Docker
   --no-push                         Build locally only; do not push to Artifact Registry
-  --register-workspacekind          Apply/update the 'jupyterlab' WorkspaceKind and GKE ComputeClasses in the current cluster
+  --register-workspacekind          Apply/update 'jupyterlab' and 'jupyterlab-resumable' WorkspaceKinds and GKE ComputeClasses in the current cluster
   -h, --help                        Show this help message
 EOF
 }
@@ -328,11 +328,35 @@ echo "  (recorded in ${TAGS_FILE})"
 # 5. Register / Update WorkspaceKind & ComputeClasses in Kubernetes Cluster (Optional)
 # ==============================================================================
 if [[ "${REGISTER_WSK}" == "true" ]]; then
+  # The WorkspaceKind bakes GCS_BUCKET into the env of every Workspace Pod, and
+  # GCS_BUCKET defaults to ${TENANT_NAMESPACE}-bucket with TENANT_NAMESPACE itself
+  # defaulting to "team-a". Registering from a shell that did not set TENANT_NAMESPACE
+  # therefore silently points every Workspace at another tenant's bucket, or at one
+  # that does not exist. Nothing fails at registration time; it surfaces much later as
+  # a 404 from inside a user's job, a long way from the cause. Check it here.
+  if ! gcloud storage ls "gs://${GCS_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "ERROR: GCS bucket 'gs://${GCS_BUCKET}' does not exist or is not readable." >&2
+    echo "  The WorkspaceKind injects GCS_BUCKET into every Workspace Pod, so" >&2
+    echo "  registering this value would hand users a bucket that 404s on write." >&2
+    echo "  Set GCS_BUCKET explicitly, or set TENANT_NAMESPACE (currently" >&2
+    echo "  '${TENANT_NAMESPACE}'), which GCS_BUCKET is derived from." >&2
+    exit 1
+  fi
+
   echo "=================================================================="
   echo "Registering WorkspaceKind 'jupyterlab' in Kubernetes cluster..."
+  echo "  GCS_BUCKET: ${GCS_BUCKET} (verified to exist)"
   echo "=================================================================="
   envsubst < "${CONTEXT_DIR}/workspacekind.yaml" | kubectl apply -f -
   echo "WorkspaceKind 'jupyterlab' applied successfully."
+
+  if [[ -f "${CONTEXT_DIR}/workspacekind-resumable.yaml" ]]; then
+    echo "=================================================================="
+    echo "Registering WorkspaceKind 'jupyterlab-resumable' in Kubernetes cluster..."
+    echo "=================================================================="
+    envsubst < "${CONTEXT_DIR}/workspacekind-resumable.yaml" | kubectl apply -f -
+    echo "WorkspaceKind 'jupyterlab-resumable' applied successfully."
+  fi
 
   if [[ -d "${MANIFESTS_DIR}" ]]; then
     echo "=================================================================="
@@ -347,6 +371,11 @@ else
   echo "  PROJECT_ID=${PROJECT_ID} REGION=${REGION} REPO_NAME=${REPO_NAME} IMAGE_NAME=${IMAGE_NAME} GCS_BUCKET=${GCS_BUCKET} \\"
   echo "  CPU_IMAGE_TAG=${CPU_IMAGE_TAG} GPU_IMAGE_TAG=${GPU_IMAGE_TAG} TPU_IMAGE_TAG=${TPU_IMAGE_TAG} \\"
   echo "    envsubst < ${CONTEXT_DIR}/workspacekind.yaml | kubectl apply -f -"
+  if [[ -f "${CONTEXT_DIR}/workspacekind-resumable.yaml" ]]; then
+    echo "  PROJECT_ID=${PROJECT_ID} REGION=${REGION} REPO_NAME=${REPO_NAME} IMAGE_NAME=${IMAGE_NAME} GCS_BUCKET=${GCS_BUCKET} \\"
+    echo "  CPU_IMAGE_TAG=${CPU_IMAGE_TAG} GPU_IMAGE_TAG=${GPU_IMAGE_TAG} TPU_IMAGE_TAG=${TPU_IMAGE_TAG} \\"
+    echo "    envsubst < ${CONTEXT_DIR}/workspacekind-resumable.yaml | kubectl apply -f -"
+  fi
   if [[ -d "${MANIFESTS_DIR}" ]]; then
     echo "  kubectl apply -f ${MANIFESTS_DIR}/"
   fi

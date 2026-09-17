@@ -1,7 +1,7 @@
 # Template rendered with envsubst. Required variables:
 #
 #   REGION, PROJECT_ID, REPO_NAME, IMAGE_NAME   registry coordinates
-#   CPU_IMAGE_TAG, GPU_IMAGE_TAG, TPU_IMAGE_TAG exact image tag per variant
+#   CPU_IMAGE_TAG, GPU_IMAGE_TAG                exact image tag per variant
 #   GCS_BUCKET                                  shared bucket for notebooks
 #
 # The image tags are pinned rather than floating on :latest-* so a Workspace restarts
@@ -21,11 +21,15 @@
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
-  name: jupyterlab
+  name: jupyterlab-resumable
+  annotations:
+    # enable pod snapshot and resume for all workspaces (all CPU and GPU podconfigs are resumable)
+    podsnapshot.gke.kubeflow.org/enabled: "true"
+    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
 spec:
   spawner:
-    displayName: "JupyterLab Notebook"
-    description: "A Workspace which runs JupyterLab in a Pod"
+    displayName: "JupyterLab Notebook (Resumable)"
+    description: "A Workspace which runs JupyterLab in a Pod with stateful pause and resume support"
     icon:
       url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
     logo:
@@ -35,7 +39,7 @@ spec:
     # --------------------------------------------------------------------------
     # IMAGE_CONFIG scope: Filter images based on selected PodConfig accelerator
     # --------------------------------------------------------------------------
-    # When a CPU pod is selected, hide GPU and TPU images
+    # When a CPU pod is selected, hide GPU images
     - scope: IMAGE_CONFIG
       effect:
         ui:
@@ -43,7 +47,7 @@ spec:
         api:
           deny: true
           denyMessage:
-            text: "This image requires an accelerator (GPU or TPU) pod, but a CPU pod was selected."
+            text: "This image requires an accelerator (GPU) pod, but a CPU pod was selected."
       match:
         - matchPodConfig:
             selector:
@@ -77,31 +81,10 @@ spec:
                   operator: NotIn
                   values: ["gpu"]
 
-    # When a TPU pod is selected, hide non-TPU images
-    - scope: IMAGE_CONFIG
-      effect:
-        ui:
-          hide: true
-        api:
-          deny: true
-          denyMessage:
-            text: "This image is not built for TPUs (missing libtpu); please select a TPU-enabled image."
-      match:
-        - matchPodConfig:
-            selector:
-              matchLabels:
-                accelerator: tpu
-        - matchImageConfig:
-            selector:
-              matchExpressions:
-                - key: accelerator
-                  operator: NotIn
-                  values: ["tpu"]
-
     # --------------------------------------------------------------------------
     # POD_CONFIG scope: Filter podConfigs based on selected ImageConfig accelerator
     # --------------------------------------------------------------------------
-    # When a CPU image is selected, hide GPU and TPU pod configs
+    # When a CPU image is selected, hide GPU pod configs
     - scope: POD_CONFIG
       effect:
         ui:
@@ -109,7 +92,7 @@ spec:
         api:
           deny: true
           denyMessage:
-            text: "A CPU image cannot be scheduled on an accelerator (GPU or TPU) pod."
+            text: "A CPU image cannot be scheduled on an accelerator (GPU) pod."
       match:
         - matchImageConfig:
             selector:
@@ -142,27 +125,6 @@ spec:
                 - key: accelerator
                   operator: NotIn
                   values: ["gpu"]
-
-    # When a TPU image is selected, hide non-TPU pod configs
-    - scope: POD_CONFIG
-      effect:
-        ui:
-          hide: true
-        api:
-          deny: true
-          denyMessage:
-            text: "A TPU image requires a TPU pod."
-      match:
-        - matchImageConfig:
-            selector:
-              matchLabels:
-                accelerator: tpu
-        - matchPodConfig:
-            selector:
-              matchExpressions:
-                - key: accelerator
-                  operator: NotIn
-                  values: ["tpu"]
 
   activityRules:
     - config:
@@ -275,21 +237,6 @@ spec:
               ports:
                 - id: "jupyterlab"
                   port: 8888
-          - id: "jupyterlab-tpu"
-            spawner:
-              displayName: "jupyterlab (TPU)"
-              description: "JupyterLab with TPU JAX (libtpu) and Kubeflow Spark SDK"
-              labels:
-                - key: "python_version"
-                  value: "3.12.9"
-                - key: "accelerator"
-                  value: "tpu"
-            spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${TPU_IMAGE_TAG}"
-              imagePullPolicy: "IfNotPresent"
-              ports:
-                - id: "jupyterlab"
-                  port: 8888
           - id: "jupyter-scipy:v1.10.0"
             spawner:
               displayName: "jupyter-scipy:v1.10.0 (Upstream)"
@@ -314,6 +261,8 @@ spec:
               displayName: "Tiny CPU"
               description: "Pod with 0.1 CPU, 128 Mb RAM"
               labels:
+                - key: "accelerator"
+                  value: "cpu"
                 - key: "cpu"
                   value: "100m"
                 - key: "memory"
@@ -389,21 +338,3 @@ spec:
                   cpu: 12
                   memory: 40Gi
                   nvidia.com/gpu: 1
-          - id: "tpu"
-            spawner:
-              displayName: "TPU v5 2x2"
-              description: "Pod with 4 TPU v5 lite chips"
-              labels:
-                - key: "accelerator"
-                  value: "tpu"
-            spec:
-              nodeSelector:
-                cloud.google.com/compute-class: "tpu-v5-4-single-host"
-              resources:
-                requests:
-                  cpu: 12
-                  memory: 24Gi
-                limits:
-                  cpu: 12
-                  memory: 24Gi
-                  google.com/tpu: 4
