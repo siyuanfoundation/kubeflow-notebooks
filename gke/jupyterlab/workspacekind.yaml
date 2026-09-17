@@ -1,3 +1,16 @@
+# Template rendered with envsubst. Required variables:
+#
+#   REGION, PROJECT_ID, REPO_NAME, IMAGE_NAME   registry coordinates
+#   CPU_IMAGE_TAG, GPU_IMAGE_TAG, TPU_IMAGE_TAG exact image tag per variant
+#   GCS_BUCKET                                  shared bucket for notebooks
+#
+# The image tags are pinned rather than floating on :latest-* so a Workspace restarts
+# onto the image it was created with, and so a rebuild cannot change the runtime under
+# a running Workspace. build_jupyterlab.sh and deploy_standalone.sh set them for you.
+#
+# Beware when rendering by hand: envsubst substitutes an unset variable with the empty
+# string, which yields `image: ".../jupyterlab:"` and a WorkspaceKind that cannot start
+# a Pod. Prefer the scripts, which print the tags they pin.
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
@@ -232,7 +245,7 @@ spec:
                 - key: "accelerator"
                   value: "cpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-cpu"
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${CPU_IMAGE_TAG}"
               imagePullPolicy: "Always"
               ports:
                 - id: "jupyterlab"
@@ -240,20 +253,20 @@ spec:
           - id: "jupyterlab-gpu"
             spawner:
               displayName: "jupyterlab (GPU)"
-              description: "JupyterLab with PyTorch (CUDA 12.4), JAX (CUDA), and Kubeflow Spark SDK"
+              description: "JupyterLab with PyTorch (CUDA 13.0), JAX (CUDA), Transformers, and Kubeflow Spark SDK"
               labels:
                 - key: "python_version"
-                  value: "3.12.9"
+                  value: "3.12.13"
                 - key: "pytorch_version"
-                  value: "2.5.1"
+                  value: "2.12.0"
                 - key: "cuda_version"
-                  value: "12.4"
+                  value: "13.0"
                 - key: "nccl_version"
-                  value: "2.21.5"
+                  value: "2.29.7"
                 - key: "accelerator"
                   value: "gpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-gpu"
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${GPU_IMAGE_TAG}"
               imagePullPolicy: "Always"
               ports:
                 - id: "jupyterlab"
@@ -268,7 +281,7 @@ spec:
                 - key: "accelerator"
                   value: "tpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:latest-tpu"
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${TPU_IMAGE_TAG}"
               imagePullPolicy: "Always"
               ports:
                 - id: "jupyterlab"

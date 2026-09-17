@@ -501,8 +501,20 @@ kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke
 
 if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]]; then
   echo "Registering WorkspaceKind 'jupyterlab' for distributed_tpu_example.ipynb..."
+  # The WorkspaceKind pins an exact image tag per variant. build_jupyterlab.sh records
+  # the tags it produced; if it has never run here, fall back to the floating tags so a
+  # deploy without locally built images still resolves to something that exists.
+  CPU_IMAGE_TAG="latest-cpu"
+  GPU_IMAGE_TAG="latest-gpu"
+  TPU_IMAGE_TAG="latest-tpu"
+  if [[ -f "${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env" ]]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env"
+  fi
+  echo "  pinning cpu=${CPU_IMAGE_TAG} gpu=${GPU_IMAGE_TAG} tpu=${TPU_IMAGE_TAG}"
   PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
     IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
+    CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
     envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" | kubectl --context="${CONTEXT}" apply -f -
 fi
 

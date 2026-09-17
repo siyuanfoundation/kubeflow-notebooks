@@ -561,13 +561,22 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
    ```
 
 3. **Register Custom `jupyterlab` WorkspaceKind & GPU/TPU ComputeClasses**:
-   Register the `jupyterlab` `WorkspaceKind` (which includes CPU, GPU, and TPU image/pod options and injects `REGISTRY` and `GCS_BUCKET` into workspace pods) and the GKE `ComputeClass` definitions (`tpu-v5-8-multi-host`, `tpu-v5-4-single-host`, `gpu-l4-spot`, `gpu-t4-spot`):
+   Register the `jupyterlab` `WorkspaceKind` (which includes CPU, GPU, and TPU image/pod options and injects `REGISTRY` and `GCS_BUCKET` into workspace pods) and the GKE `ComputeClass` definitions (`tpu-v5-8-multi-host`, `tpu-v5-4-single-host`, `gpu-l4-spot`, `gpu-t4-spot`).
+
+   The `WorkspaceKind` pins an exact image tag per variant rather than floating on `:latest-*`, so a Workspace restarts onto the image it was created with and a rebuild cannot swap the runtime underneath a running Workspace. `build_jupyterlab.sh` records the tags it produced in `gke/rendered/jupyterlab-image-tags.env`; source that file so you pin the images you actually built:
    ```bash
+   # Tags written by build_jupyterlab.sh. Without these, envsubst renders an empty
+   # tag and the WorkspaceKind cannot start a Pod.
+   source gke/rendered/jupyterlab-image-tags.env
+
    PROJECT_ID="${PROJECT}" \
    REGION="${REGION}" \
    REPO_NAME="${REPOSITORY}" \
    IMAGE_NAME="jupyterlab" \
    GCS_BUCKET="${GCS_BUCKET}" \
+   CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" \
+   GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" \
+   TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
      envsubst < gke/jupyterlab/workspacekind.yaml | kubectl --context="${CONTEXT}" apply -f -
 
    kubectl --context="${CONTEXT}" apply -f gke/manifests/compute-classes/

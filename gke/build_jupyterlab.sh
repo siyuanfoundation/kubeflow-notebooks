@@ -17,7 +17,11 @@ export PROJECT_ID="${PROJECT_ID:-${PROJECT:-$(gcloud config get-value project 2>
 export REGION="${REGION:-us-central1}"
 export REPO_NAME="${REPO_NAME:-${REPOSITORY:-notebooks}}"
 export IMAGE_NAME="${IMAGE_NAME:-jupyterlab}"
-export IMAGE_TAG="${IMAGE_TAG:-gemini}"
+# Default to a build timestamp so each build gets its own immutable tag and the
+# WorkspaceKind can pin to it. Seconds are included on purpose: a bare date would be
+# reused by a second build on the same day, which is the mutable-tag problem again.
+# Override IMAGE_TAG to pin a build to a name of your choosing.
+export IMAGE_TAG="${IMAGE_TAG:-v$(date -u +%Y%m%d-%H%M%S)}"
 export TENANT_NAMESPACE="${TENANT_NAMESPACE:-team-a}"
 export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
 
@@ -33,7 +37,9 @@ Usage: $(basename "$0") [options]
 Build and push custom Kubeflow JupyterLab (CPU, GPU, TPU) and Spark images to Google Artifact Registry
 for standalone Kubeflow Workspaces on GKE.
 
-All built images are tagged with both \${IMAGE_TAG} and 'latest':
+All built images are tagged with both \${IMAGE_TAG} and 'latest'. IMAGE_TAG defaults to a
+build timestamp (e.g. v20260917-161530) so every build is separately addressable, and the
+WorkspaceKind pins the exact tag rather than the floating 'latest' one:
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-cpu  (& :latest-cpu)
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-gpu  (& :latest-gpu)
   \${REGION}-docker.pkg.dev/\${PROJECT_ID}/\${REPO_NAME}/\${IMAGE_NAME}:\${IMAGE_TAG}-tpu  (& :latest-tpu)
@@ -105,6 +111,18 @@ case "${VARIANT}" in
     exit 1
     ;;
 esac
+
+# The WorkspaceKind pins an exact, immutable tag (see section 4). If we never
+# push that tag, registering it leaves the cluster pointing at an image that
+# does not exist in the registry, and every new Workspace fails with
+# ImagePullBackOff. Fail before the (long) build rather than after it.
+if [[ "${REGISTER_WSK}" == "true" && "${PUSH_IMAGE}" != "true" ]]; then
+  echo "ERROR: --register-workspacekind cannot be combined with --no-push." >&2
+  echo "  The WorkspaceKind would pin image tag '${IMAGE_TAG}', which would" >&2
+  echo "  never be pushed, breaking Workspace creation." >&2
+  echo "  Drop --no-push, or drop --register-workspacekind." >&2
+  exit 1
+fi
 
 echo "=================================================================="
 echo "Build Configuration:"
@@ -251,7 +269,58 @@ done
 echo "=================================================================="
 
 # ==============================================================================
-# 4. Register / Update WorkspaceKind & ComputeClasses in Kubernetes Cluster (Optional)
+# 4. Resolve the image tag each WorkspaceKind variant pins to
+# ==============================================================================
+# The WorkspaceKind pins an exact tag per variant instead of a floating :latest-*,
+# so a Workspace restarts onto the same image it was created with. That makes a
+# partial build a hazard: rendering the manifest with this run's tag after
+# `--variant gpu` would repoint cpu and tpu at an image that was never built. So a
+# variant we did not build keeps whatever the live cluster already references, and
+# only falls back to :latest-<variant> when there is nothing deployed to read.
+variant_tag() {
+  local variant="$1"
+  if [[ " ${VARIANTS[*]} " == *" ${variant} "* ]]; then
+    echo "${IMAGE_TAG}-${variant}"
+    return
+  fi
+
+  local deployed
+  deployed="$(kubectl get workspacekind jupyterlab \
+    -o "jsonpath={.spec.podTemplate.options.imageConfig.values[?(@.id=='jupyterlab-${variant}')].spec.image}" \
+    2>/dev/null || true)"
+  if [[ -n "${deployed}" ]]; then
+    echo "${deployed##*:}"
+  else
+    echo "latest-${variant}"
+  fi
+}
+
+CPU_IMAGE_TAG="$(variant_tag cpu)"
+GPU_IMAGE_TAG="$(variant_tag gpu)"
+TPU_IMAGE_TAG="$(variant_tag tpu)"
+export CPU_IMAGE_TAG GPU_IMAGE_TAG TPU_IMAGE_TAG
+
+# Publish them so deploy_standalone.sh pins the same images when it renders the
+# WorkspaceKind, rather than re-deriving them and risking a different answer.
+TAGS_FILE="${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env"
+mkdir -p "$(dirname "${TAGS_FILE}")"
+cat > "${TAGS_FILE}" <<EOF
+# Written by build_jupyterlab.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ). Consumed by
+# deploy_standalone.sh so the WorkspaceKind pins the images this build produced.
+CPU_IMAGE_TAG="${CPU_IMAGE_TAG}"
+GPU_IMAGE_TAG="${GPU_IMAGE_TAG}"
+TPU_IMAGE_TAG="${TPU_IMAGE_TAG}"
+EOF
+
+echo ""
+echo "WorkspaceKind will pin these tags:"
+echo "  cpu -> ${CPU_IMAGE_TAG}"
+echo "  gpu -> ${GPU_IMAGE_TAG}"
+echo "  tpu -> ${TPU_IMAGE_TAG}"
+echo "  (recorded in ${TAGS_FILE})"
+
+# ==============================================================================
+# 5. Register / Update WorkspaceKind & ComputeClasses in Kubernetes Cluster (Optional)
 # ==============================================================================
 if [[ "${REGISTER_WSK}" == "true" ]]; then
   echo "=================================================================="
@@ -271,6 +340,7 @@ else
   echo ""
   echo "To register or update this image and ComputeClasses in Kubeflow Workspaces on your GKE cluster, run:"
   echo "  PROJECT_ID=${PROJECT_ID} REGION=${REGION} REPO_NAME=${REPO_NAME} IMAGE_NAME=${IMAGE_NAME} GCS_BUCKET=${GCS_BUCKET} \\"
+  echo "  CPU_IMAGE_TAG=${CPU_IMAGE_TAG} GPU_IMAGE_TAG=${GPU_IMAGE_TAG} TPU_IMAGE_TAG=${TPU_IMAGE_TAG} \\"
   echo "    envsubst < ${CONTEXT_DIR}/workspacekind.yaml | kubectl apply -f -"
   if [[ -d "${MANIFESTS_DIR}" ]]; then
     echo "  kubectl apply -f ${MANIFESTS_DIR}/"
