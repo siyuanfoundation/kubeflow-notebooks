@@ -23,12 +23,58 @@ This document describes a zero-intrusion architecture for enabling stateful **Pa
 
 ## 2. System Architecture
 
-The solution is deployed as a single standalone Kubernetes controller-runtime manager binary (**`gke-workspace-snapshot-addon`**) containing:
+The solution is deployed as a **standalone Deployment** (**`gke-workspace-snapshot-addon`**) in the `kubeflow-workspaces` namespace, containing:
 1. **`Workspace` Mutating Admission Webhook** (`UPDATE` on `kubeflow.org/v1beta1/workspaces`)
 2. **`Pod` Mutating Admission Webhook** (`CREATE` on `v1/pods`)
-3. **Snapshot Addon Reconciler** (watches `Workspace`, `Pod`, and `PodSnapshot`)
+3. **Snapshot Addon Reconciler** (watches `Workspace`, `WorkspaceKind`, `Pod`, `PodSnapshotPolicy`, `PodSnapshotManualTrigger` and `PodSnapshot`)
 
-### 2.1. Annotations & ReadinessGate Contract
+### 2.1. Deployment Boundary
+
+The addon is deliberately **not** part of `gke-access-proxy`:
+
+| Concern | `gke-access-proxy` | `gke-workspace-snapshot-addon` |
+| :--- | :--- | :--- |
+| **Failure mode** | User-facing data path. An outage breaks JupyterLab access. | Control plane only. An outage leaves running Workspaces untouched; both webhooks are `failurePolicy: Ignore`, so Workspaces keep starting and stopping (statelessly). |
+| **Scaling driver** | Concurrent user sessions and WebSocket traffic. | Number of Workspaces and checkpoint events. |
+| **RBAC** | `subjectaccessreviews`, read-only `workspaces` / `workspacekinds`. | Write access to `workspaces`, `pods/status`, `configmaps` and all `podsnapshot.gke.io` resources. |
+| **Kubernetes client budget** | QPS 100 / burst 200, sized for request bursts. | QPS 50 / burst 100, isolated so Workspace churn cannot starve user traffic. |
+
+Splitting them also means a snapshot rollout, crash loop or CPU spike never restarts a proxy replica that is carrying live notebook WebSockets.
+
+### 2.2. Reconciler Scalability Model
+
+The reconciler is **level triggered and event driven**. It never polls:
+
+- **Watches, not lists.** One shared informer per resource type covers the whole cluster. Pods are watched with the label selector `notebooks.kubeflow.org/workspace-name` and the IPC `ConfigMap` with the field selector `metadata.name=jupyter-ipc-config`, so the caches only ever hold objects the addon actually owns.
+- **A rate limited work queue keyed by `Workspace`.** Events from any watched object are mapped back to their `Workspace` (Pods by label index, GKE resources by `ownerReference`) and coalesced into one queue item, so a burst of events costs one reconcile. Failures are retried with exponential backoff instead of a fixed loop.
+- **Cache-backed reads.** A steady-state reconcile of a healthy Workspace issues **zero API calls**: every read is served by an informer cache and writes only happen when the observed state differs from the desired state.
+- **Delayed requeue instead of sleeping.** The socket settle grace period is implemented as `AddAfter(remaining)` on the queue, so a pausing Workspace occupies no worker while it waits.
+- **Leader election.** Replicas are scaled for webhook availability, but only the holder of the `gke-workspace-snapshot-addon` `Lease` runs the reconcile workers, so there is never duplicate work against the GKE PodSnapshot API. Losing the lease stops reconciliation without taking the webhooks down.
+- **Ordering independence.** The addon starts serving admission requests as soon as the Workspace/Pod caches are warm and waits for the `podsnapshot.gke.io/v1` CRDs in the background, so it can be installed before (or without) the GKE PodSnapshot feature.
+
+The result is that steady-state API-server load is proportional to the *rate of Workspace changes*, not to the number of namespaces, Workspaces or replicas.
+
+#### PodSnapshot ownership and cleanup
+
+GKE installs a `ValidatingAdmissionPolicy` (`gke-pod-snapshot-validating-admission-policy`) that **rejects any create, update or patch of a `PodSnapshot` from a principal other than the GKE snapshot controller and agent**. Two consequences shape the design:
+
+- We cannot attach a `Workspace` `ownerReference` to a `PodSnapshot`, so Kubernetes garbage collection cannot retire them. The addon deletes them explicitly — after a restore completes, and when a `Workspace` disappears — using the `gke-pod-snapshot-triggered-by` label that GKE stamps on every snapshot with the name of the trigger that produced it. Because that trigger name is derived from the `Workspace` name, the label is a reliable handle even if the `Workspace` object is already gone.
+- The addon's `ClusterRole` grants only `get, list, watch, delete, deletecollection` on `podsnapshots`. Requesting write verbs would be misleading: the request would be admitted by RBAC and then rejected by the policy.
+
+**Teardown ordering.** GKE's snapshot finalizer resolves a snapshot's storage location by following `PodSnapshot.spec.policyName` → `PodSnapshotPolicy` → `PodSnapshotStorageConfig`. If the policy is removed first, the finalizer cannot find the bucket: it releases the `PodSnapshot` object anyway and **silently leaves the checkpoint files in GCS**. The `PodSnapshotPolicy` therefore carries *no* `Workspace` `ownerReference` — otherwise the garbage collector would delete it the instant the `Workspace` went away, in a race with our own snapshot deletion. Instead `reconcileDeletedWorkspace` runs an ordered teardown:
+
+1. Delete the `Workspace`'s `PodSnapshot`s by label.
+2. Requeue every `snapshotDrainInterval` while any of them are still present (terminating snapshots emit no further watch events, so this is the one place the reconciler polls).
+3. Once they are all gone, delete the `PodSnapshotPolicy` and `PodSnapshotManualTrigger`.
+
+Because the policy outlives the `Workspace`, it doubles as a tombstone: the policy informer's initial sync re-enqueues the absent `Workspace` on startup, so a teardown interrupted by a crash or a restart is finished automatically.
+
+The `PodSnapshotManualTrigger` is not subject to the PodSnapshot write restriction and is additionally owned by the `Workspace`.
+
+**Bounding step 2.** GKE removes the GCS objects within about a second of the delete and only *then* releases its finalizer, but the release itself is unreliable — one snapshot on the test cluster stayed terminating for over 16 minutes with a healthy origin node and `pod-snapshot-agent`. Waiting unconditionally would pin the policy (and a 10 s requeue) forever, so step 2 gives up after `snapshotDrainTimeout` (5 minutes) and retires the policy anyway. By that point the data has almost certainly been deleted; if it somehow has not, the `Delete` lifecycle rule that `deploy_standalone.sh` applies to the snapshot bucket (`SNAPSHOT_RETENTION_DAYS`, 14 days by default) is the backstop that bounds the cost. That lifecycle rule is what makes giving up acceptable, and it is why the bucket must keep it.
+
+
+### 2.3. Annotations & ReadinessGate Contract
 
 #### Workspace Annotations (`Workspace.metadata.annotations`)
 | Annotation Key | Set By | Values / Description |

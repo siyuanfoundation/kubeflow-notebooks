@@ -14,6 +14,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
@@ -199,6 +200,54 @@ func (access *KubernetesAccess) InvalidateWorkspaceCache(namespace, name string)
 		if key.namespace == namespace && key.name == name {
 			delete(access.cache, key)
 		}
+	}
+}
+
+// WatchWorkspaces drops cached resolutions as soon as a Workspace changes, so a
+// pause, resume or deletion takes effect on every proxy replica immediately rather
+// than after the resolve cache TTL. It retries until ctx is cancelled.
+func (access *KubernetesAccess) WatchWorkspaces(ctx context.Context) {
+	tenants := make([]string, 0, len(access.tenants))
+	for tenant := range access.tenants {
+		tenants = append(tenants, tenant)
+	}
+	sort.Strings(tenants)
+	var group sync.WaitGroup
+	for _, tenant := range tenants {
+		group.Add(1)
+		go func(namespace string) {
+			defer group.Done()
+			access.watchNamespace(ctx, namespace)
+		}(tenant)
+	}
+	group.Wait()
+}
+
+func (access *KubernetesAccess) watchNamespace(ctx context.Context, namespace string) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		watcher, err := access.resources.Resource(workspaceResource).Namespace(namespace).
+			Watch(ctx, metav1.ListOptions{AllowWatchBookmarks: true})
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = time.Second
+		for event := range watcher.ResultChan() {
+			workspace, ok := event.Object.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			access.InvalidateWorkspaceCache(workspace.GetNamespace(), workspace.GetName())
+		}
+		watcher.Stop()
 	}
 }
 

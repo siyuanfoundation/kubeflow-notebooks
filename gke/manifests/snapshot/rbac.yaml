@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gke-workspace-snapshot-addon
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gke-workspace-snapshot-addon
+rules:
+  # The addon watches Workspaces and WorkspaceKinds and patches Workspace
+  # annotations and spec.paused to drive the pause and resume state machine.
+  - apiGroups: [kubeflow.org]
+    resources: [workspacekinds]
+    verbs: [get, list, watch]
+  - apiGroups: [kubeflow.org]
+    resources: [workspaces]
+    verbs: [get, list, watch, patch, update]
+  # Workspace Pods are watched to publish the readinessGate condition.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [get, patch, update]
+  # The jupyter-ipc-config ConfigMap is materialised in each tenant namespace.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [podsnapshot.gke.io]
+    resources:
+      - podsnapshotstorageconfigs
+      - podsnapshotpolicies
+      - podsnapshotmanualtriggers
+    verbs: [get, list, watch, create, update, patch, delete]
+  # PodSnapshots are written exclusively by GKE: its ValidatingAdmissionPolicy
+  # rejects create/update from any other principal. We only observe them and
+  # retire them once they have been consumed or their Workspace is gone.
+  - apiGroups: [podsnapshot.gke.io]
+    resources: [podsnapshots]
+    verbs: [get, list, watch, delete, deletecollection]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gke-workspace-snapshot-addon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gke-workspace-snapshot-addon
+subjects:
+  - kind: ServiceAccount
+    name: gke-workspace-snapshot-addon
+    namespace: kubeflow-workspaces
+---
+# Leader election is namespace scoped: only the Lease named after the addon is
+# writable, so a compromised replica cannot disrupt any other controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gke-workspace-snapshot-addon-leader-election
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [gke-workspace-snapshot-addon]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gke-workspace-snapshot-addon-leader-election
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gke-workspace-snapshot-addon-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: gke-workspace-snapshot-addon
+    namespace: kubeflow-workspaces

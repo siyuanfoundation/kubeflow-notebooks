@@ -14,22 +14,11 @@ rules:
   - apiGroups: [kubeflow.org]
     resources: [workspacekinds]
     verbs: [get, list, watch]
+  # watch is required so every replica invalidates its resolve cache the moment a
+  # Workspace is paused, resumed or deleted.
   - apiGroups: [kubeflow.org]
     resources: [workspaces]
-    verbs: [get, list, watch, patch, update]
-  - apiGroups: [""]
-    resources: [pods, pods/status]
-    verbs: [get, list, watch, patch, update]
-  - apiGroups: [""]
-    resources: [configmaps]
-    verbs: [get, list, watch, create, update, patch]
-  - apiGroups: [podsnapshot.gke.io]
-    resources:
-      - podsnapshotstorageconfigs
-      - podsnapshotpolicies
-      - podsnapshotmanualtriggers
-      - podsnapshots
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -21,6 +21,11 @@ import (
 
 const systemNamespace = "kubeflow-workspaces"
 
+// snapshotAddonName is the standalone GKE PodSnapshot controller and webhook
+// deployment. It is deliberately separate from gke-access-proxy so a failure in
+// the snapshot control plane cannot take user traffic down.
+const snapshotAddonName = "gke-workspace-snapshot-addon"
+
 type Config struct {
 	ControlPlaneCIDR              string            `json:"controlPlaneCIDR"`
 	Hostname                      string            `json:"hostname"`
@@ -94,15 +99,26 @@ func (config Config) Validate() error {
 		}
 		seen[tenant] = true
 	}
-	if len(config.Images) != 4 {
-		return fmt.Errorf("exactly four component images are required")
+	if len(config.Images) != 5 {
+		return fmt.Errorf("exactly five component images are required")
 	}
-	for _, component := range []string{"controller", "backend", "frontend", "proxy"} {
+	for _, component := range []string{"controller", "backend", "frontend", "proxy", "snapshot"} {
 		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(config.Images[component]) {
 			return fmt.Errorf("%s image must be pinned by sha256 digest", component)
 		}
 	}
 	return nil
+}
+
+// snapshotBucket resolves the GCS bucket backing PodSnapshotStorageConfig.
+func (config Config) snapshotBucket() string {
+	if config.SnapshotGCSBucket != "" {
+		return config.SnapshotGCSBucket
+	}
+	if len(config.Tenants) > 0 && config.Tenants[0] != "" {
+		return config.Tenants[0] + "-snapshots-bucket"
+	}
+	return ""
 }
 
 func Kustomize(ctx context.Context, directory string) ([]unstructured.Unstructured, error) {
@@ -155,43 +171,39 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 			result = append(result, object("v1", "Namespace", "notebooks-connections", "", nil))
 		}
 	case "isolation":
-		result = append(result, object("networking.k8s.io/v1", "NetworkPolicy", "gke-webhook-ingress", systemNamespace, map[string]any{"spec": map[string]any{
-			"podSelector": map[string]any{"matchLabels": map[string]any{"app": "workspaces-controller"}},
-			"policyTypes": []any{"Ingress"},
-			"ingress": []any{map[string]any{
-				"from": []any{
-					map[string]any{"ipBlock": map[string]any{"cidr": config.ControlPlaneCIDR}},
-					map[string]any{
-						"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
-						"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "konnectivity-agent"}},
+		// The API server (or its konnectivity agent) is the only client allowed to
+		// reach a webhook port.
+		webhookIngress := func(name, app string) unstructured.Unstructured {
+			return object("networking.k8s.io/v1", "NetworkPolicy", name, systemNamespace, map[string]any{"spec": map[string]any{
+				"podSelector": map[string]any{"matchLabels": map[string]any{"app": app}},
+				"policyTypes": []any{"Ingress"},
+				"ingress": []any{map[string]any{
+					"from": []any{
+						map[string]any{"ipBlock": map[string]any{"cidr": config.ControlPlaneCIDR}},
+						map[string]any{
+							"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
+							"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "konnectivity-agent"}},
+						},
 					},
-				},
-				"ports": []any{map[string]any{"protocol": "TCP", "port": int64(9443)}},
-			}},
-		}}))
-		for _, overlay := range []string{"upstream", "proxy"} {
+					"ports": []any{map[string]any{"protocol": "TCP", "port": int64(9443)}},
+				}},
+			}})
+		}
+		result = append(result, webhookIngress("gke-webhook-ingress", "workspaces-controller"))
+		// The snapshot addon runs in its own deployment, so it carries its own
+		// isolation instead of sharing the access proxy's.
+		result = append(result, webhookIngress("gke-snapshot-webhook-ingress", snapshotAddonName))
+		for _, overlay := range []string{"upstream", "proxy", "snapshot"} {
 			resources, err := build(ctx, filepath.Join(root, "gke/manifests", overlay))
 			if err != nil {
 				return nil, err
 			}
 			for _, resource := range resources {
 				if resource.GetKind() == "NetworkPolicy" {
-					if resource.GetName() == "gke-proxy-ingress" {
+					if resource.GetName() == "gke-proxy-ingress" && config.DesktopHostname != "" {
 						ingress, _, _ := unstructured.NestedSlice(resource.Object, "spec", "ingress")
-						if config.DesktopHostname != "" {
-							rule := ingress[0].(map[string]any)
-							rule["ports"] = append(rule["ports"].([]any), map[string]any{"protocol": "TCP", "port": int64(8081)})
-						}
-						ingress = append(ingress, map[string]any{
-							"from": []any{
-								map[string]any{"ipBlock": map[string]any{"cidr": config.ControlPlaneCIDR}},
-								map[string]any{
-									"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
-									"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "konnectivity-agent"}},
-								},
-							},
-							"ports": []any{map[string]any{"protocol": "TCP", "port": int64(9443)}},
-						})
+						rule := ingress[0].(map[string]any)
+						rule["ports"] = append(rule["ports"].([]any), map[string]any{"protocol": "TCP", "port": int64(8081)})
 						_ = unstructured.SetNestedSlice(resource.Object, ingress, "spec", "ingress")
 					}
 					result = append(result, resource)
@@ -209,7 +221,7 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 			}
 		}
 	case "applications":
-		for _, overlay := range []string{"upstream", "proxy"} {
+		for _, overlay := range []string{"upstream", "proxy", "snapshot"} {
 			resources, err := build(ctx, filepath.Join(root, "gke/manifests", overlay))
 			if err != nil {
 				return nil, err
@@ -223,8 +235,11 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 				}
 				if resource.GetKind() == "Deployment" {
 					component := strings.TrimPrefix(resource.GetName(), "workspaces-")
-					if resource.GetName() == "gke-access-proxy" {
+					switch resource.GetName() {
+					case "gke-access-proxy":
 						component = "proxy"
+					case snapshotAddonName:
+						component = "snapshot"
 					}
 					image, ok := config.Images[component]
 					if !ok {
@@ -250,20 +265,29 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 		if burst == 0 {
 			burst = 200
 		}
-		snapshotBucket := config.SnapshotGCSBucket
-		if snapshotBucket == "" && len(config.Tenants) > 0 && config.Tenants[0] != "" {
-			snapshotBucket = config.Tenants[0] + "-snapshots-bucket"
-		}
-		result = append([]unstructured.Unstructured{object("v1", "ConfigMap", "gke-access-proxy", systemNamespace, map[string]any{"data": map[string]any{
-			"PUBLIC_URL":          "https://" + config.Hostname,
-			"IAP_AUDIENCE":        config.IAPAudience,
-			"FRONTEND_URL":        "http://workspaces-frontend.kubeflow-workspaces.svc:8080",
-			"BACKEND_URL":         "http://workspaces-backend.kubeflow-workspaces.svc:4000",
-			"TENANT_NAMESPACES":   strings.Join(config.Tenants, ","),
-			"KUBE_CLIENT_QPS":     strconv.FormatFloat(qps, 'f', -1, 64),
-			"KUBE_CLIENT_BURST":   strconv.Itoa(burst),
-			"SNAPSHOT_GCS_BUCKET": snapshotBucket,
-		}})}, result...)
+		result = append([]unstructured.Unstructured{
+			object("v1", "ConfigMap", "gke-access-proxy", systemNamespace, map[string]any{"data": map[string]any{
+				"PUBLIC_URL":        "https://" + config.Hostname,
+				"IAP_AUDIENCE":      config.IAPAudience,
+				"FRONTEND_URL":      "http://workspaces-frontend.kubeflow-workspaces.svc:8080",
+				"BACKEND_URL":       "http://workspaces-backend.kubeflow-workspaces.svc:4000",
+				"TENANT_NAMESPACES": strings.Join(config.Tenants, ","),
+				"KUBE_CLIENT_QPS":   strconv.FormatFloat(qps, 'f', -1, 64),
+				"KUBE_CLIENT_BURST": strconv.Itoa(burst),
+			}}),
+			// The addon is rate limited independently of user traffic: it only talks
+			// to the API server, and a burst of Workspace churn must never consume
+			// the access proxy's client budget.
+			object("v1", "ConfigMap", snapshotAddonName, systemNamespace, map[string]any{"data": map[string]any{
+				"TENANT_NAMESPACES":   strings.Join(config.Tenants, ","),
+				"SNAPSHOT_GCS_BUCKET": config.snapshotBucket(),
+				"SNAPSHOT_WORKERS":    "4",
+				"SNAPSHOT_RESYNC":     "10m",
+				"LEADER_ELECTION":     "true",
+				"KUBE_CLIENT_QPS":     "50",
+				"KUBE_CLIENT_BURST":   "100",
+			}}),
+		}, result...)
 		if config.DesktopHostname != "" {
 			_ = unstructured.SetNestedField(result[0].Object, "https://"+config.DesktopHostname, "data", "DESKTOP_URL")
 			policy, _ := (connectionpolicy.Policy{DefaultSeconds: config.ConnectionTokenDefaultSeconds, MaxSeconds: config.ConnectionTokenMaxSeconds}).Resolve()

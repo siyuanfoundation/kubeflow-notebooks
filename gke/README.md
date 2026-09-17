@@ -176,6 +176,20 @@ this initial version is browser-focused. An origin check is not authorization.
 image and a required `gke-access-proxy` ConfigMap containing the environment values
 above. No public Gateway or IAP policy is installed by these manifests.
 
+[Snapshot addon manifests](manifests/snapshot/kustomization.yaml) package the
+stateful pause/resume control plane (`gke-workspace-snapshot-addon`) as a **separate
+deployment** from the proxy: the executable is `bin/snapshot-addon`, built from
+[snapshot.Dockerfile](snapshot.Dockerfile). It serves the two mutating admission
+webhooks on `9443` and runs a watch-driven, leader-elected reconciler; it holds the
+write permissions on `workspaces`, `pods/status` and `podsnapshot.gke.io`
+resources, none of which the proxy needs. Both webhooks use `failurePolicy: Ignore`,
+so an addon outage degrades pause/resume to stateless behaviour instead of blocking
+Workspace operations. Its ConfigMap accepts `TENANT_NAMESPACES`,
+`SNAPSHOT_GCS_BUCKET`, `SNAPSHOT_WORKERS`, `SNAPSHOT_RESYNC`,
+`SNAPSHOT_SETTLE_GRACE_PERIOD`, `LEADER_ELECTION`, `KUBE_CLIENT_QPS` and
+`KUBE_CLIENT_BURST`. See [the design document](pod_snapshot_webhook_design.md) for
+the deployment boundary and scalability model.
+
 [Tenant manifests](manifests/tenant/kustomization.yaml) must be rendered with the
 target tenant namespace and installed before any tenant workloads start. They grant
 the proxy only `get workspaces` and `list services` in that namespace. They do not

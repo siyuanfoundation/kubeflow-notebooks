@@ -171,6 +171,8 @@ if [[ "${BUILD_IMAGES}" == "true" ]]; then
   echo "=================================================================="
   gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
   docker build --platform=linux/amd64 -t "${REGISTRY}/gke-access-proxy:${TAG}" "${SCRIPT_DIR}"
+  docker build --platform=linux/amd64 -f "${SCRIPT_DIR}/snapshot.Dockerfile" \
+    -t "${REGISTRY}/gke-snapshot-addon:${TAG}" "${SCRIPT_DIR}"
   docker build --platform=linux/amd64 -f "${SCRIPT_DIR}/frontend.Dockerfile" \
     -t "${REGISTRY}/gke-frontend:${TAG}" "${REPO_ROOT}"
   docker build --platform=linux/amd64 -f "${REPO_ROOT}/workspaces/controller/Dockerfile" \
@@ -178,7 +180,7 @@ if [[ "${BUILD_IMAGES}" == "true" ]]; then
   docker build --platform=linux/amd64 -f "${REPO_ROOT}/workspaces/backend/Dockerfile" \
     -t "${REGISTRY}/gke-backend:${TAG}" "${REPO_ROOT}/workspaces"
 
-  for component in access-proxy frontend controller backend; do
+  for component in access-proxy snapshot-addon frontend controller backend; do
     docker push "${REGISTRY}/gke-${component}:${TAG}"
   done
 fi
@@ -312,6 +314,8 @@ export CONTROL_PLANE_CIDR="${CONTROL_PLANE_CIDR:-${CONTROL_PLANE_IP}/32}"
 
 PROXY_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-access-proxy:${TAG}" \
   --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+SNAPSHOT_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-snapshot-addon:${TAG}" \
+  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
 FRONTEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-frontend:${TAG}" \
   --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
 CONTROLLER_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-controller:${TAG}" \
@@ -332,13 +336,14 @@ jq -n \
   --argjson qps "${KUBE_CLIENT_QPS}" \
   --argjson burst "${KUBE_CLIENT_BURST}" \
   --arg proxy "${PROXY_IMAGE}" \
+  --arg snapshot "${SNAPSHOT_IMAGE}" \
   --arg frontend "${FRONTEND_IMAGE}" \
   --arg controller "${CONTROLLER_IMAGE}" \
   --arg backend "${BACKEND_IMAGE}" \
   '{controlPlaneCIDR:$cidr,hostname:$host,desktopHostname:$desktopHost,certificateMap:$certificateMap,
     addressName:$addressName,iapClientID:$client,iapSecretName:$secret,
     iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,snapshotGCSBucket:$snapshotBucket,tenants:[$tenant],
-    images:{proxy:$proxy,frontend:$frontend,controller:$controller,backend:$backend}}' \
+    images:{proxy:$proxy,snapshot:$snapshot,frontend:$frontend,controller:$controller,backend:$backend}}' \
   > "${SCRIPT_DIR}/deployment.local.json"
 
 rm -rf "${SCRIPT_DIR}/rendered/bootstrap"
@@ -414,7 +419,7 @@ kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-man
   -f "${SCRIPT_DIR}/rendered/ready/applications.json"
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
 
-for component in workspaces-controller workspaces-backend workspaces-frontend gke-access-proxy; do
+for component in workspaces-controller workspaces-backend workspaces-frontend gke-access-proxy gke-workspace-snapshot-addon; do
   kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/"${component}" --timeout=5m
 done
 

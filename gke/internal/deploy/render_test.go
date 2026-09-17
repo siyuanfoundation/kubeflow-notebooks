@@ -15,7 +15,7 @@ import (
 
 func fixture() Config {
 	images := map[string]string{}
-	for _, component := range []string{"controller", "backend", "frontend", "proxy"} {
+	for _, component := range []string{"controller", "backend", "frontend", "proxy", "snapshot"} {
 		images[component] = "example.com/" + component + "@sha256:" + strings.Repeat("a", 64)
 	}
 	return Config{ControlPlaneCIDR: "10.0.0.1/32", Hostname: "notebooks.example.com", CertificateMap: "notebooks", AddressName: "notebooks", IAPClientID: "123-example.apps.googleusercontent.com", IAPSecretName: "iap-oauth", Tenants: []string{"team-a", "team-b"}, Images: images}
@@ -82,19 +82,36 @@ func TestWebhookIngressAllowsOnlyControlPlaneSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resources) != 1 || resources[0].GetName() != "gke-webhook-ingress" || resources[0].GetNamespace() != systemNamespace {
-		t.Fatalf("unexpected webhook policy: %v", resources)
+	// Both webhook servers (the upstream controller and the standalone snapshot
+	// addon) must be reachable only from the control plane.
+	if len(resources) != 2 {
+		t.Fatalf("unexpected webhook policies: %v", resources)
 	}
-	spec, found, err := unstructured.NestedMap(resources[0].Object, "spec")
+	names := map[string]string{
+		"gke-webhook-ingress":          "workspaces-controller",
+		"gke-snapshot-webhook-ingress": "gke-workspace-snapshot-addon",
+	}
+	for _, resource := range resources {
+		app, known := names[resource.GetName()]
+		if !known || resource.GetNamespace() != systemNamespace {
+			t.Fatalf("unexpected webhook policy: %v", resource.GetName())
+		}
+		assertWebhookIngress(t, resource, app, config.ControlPlaneCIDR)
+	}
+}
+
+func assertWebhookIngress(t *testing.T, resource unstructured.Unstructured, app, cidr string) {
+	t.Helper()
+	spec, found, err := unstructured.NestedMap(resource.Object, "spec")
 	if err != nil || !found {
 		t.Fatalf("missing policy spec: %v", err)
 	}
 	want := map[string]any{
-		"podSelector": map[string]any{"matchLabels": map[string]any{"app": "workspaces-controller"}},
+		"podSelector": map[string]any{"matchLabels": map[string]any{"app": app}},
 		"policyTypes": []any{"Ingress"},
 		"ingress": []any{map[string]any{
 			"from": []any{
-				map[string]any{"ipBlock": map[string]any{"cidr": config.ControlPlaneCIDR}},
+				map[string]any{"ipBlock": map[string]any{"cidr": cidr}},
 				map[string]any{
 					"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
 					"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "konnectivity-agent"}},
@@ -222,7 +239,7 @@ func TestRenderStages(t *testing.T) {
 					t.Fatal("unscoped isolation resource")
 				}
 			}
-			if stage == "applications" && deployments != 4 {
+			if stage == "applications" && deployments != 5 {
 				t.Fatalf("got %d deployments", deployments)
 			}
 		})

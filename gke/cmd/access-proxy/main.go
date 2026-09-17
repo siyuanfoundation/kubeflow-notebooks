@@ -17,7 +17,6 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/kubeflow/notebooks/gke/internal/access"
 	"github.com/kubeflow/notebooks/gke/internal/connectionpolicy"
-	"github.com/kubeflow/notebooks/gke/internal/snapshot"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -60,10 +59,6 @@ func intEnvironment(name string, defaultVal int) int {
 
 func main() {
 	listen := flag.String("listen", ":8080", "HTTP listen address; TLS terminates at the GKE load balancer")
-	webhookListen := flag.String("webhook-listen", ":9443", "HTTPS listen address for Kubernetes Mutating Admission Webhooks")
-	webhookCert := flag.String("webhook-cert", "/tmp/k8s-webhook-server/serving-certs/tls.crt", "TLS certificate file for admission webhooks")
-	webhookKey := flag.String("webhook-key", "/tmp/k8s-webhook-server/serving-certs/tls.key", "TLS key file for admission webhooks")
-	snapshotBucket := flag.String("snapshot-bucket", os.Getenv("SNAPSHOT_GCS_BUCKET"), "GCS bucket for GKE PodSnapshots")
 	audience := flag.String("iap-audience", os.Getenv("IAP_AUDIENCE"), "Exact IAP signed assertion audience")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "Public HTTPS origin without a path")
 	desktopURL := flag.String("desktop-url", os.Getenv("DESKTOP_URL"), "Optional separate HTTPS origin for token-authenticated desktop access")
@@ -104,18 +99,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	snapshotCtrl, err := snapshot.NewController(config, managed, *snapshotBucket, workspaces.InvalidateWorkspaceCache)
-	if err != nil {
-		log.Fatal(err)
-	}
-	go snapshotCtrl.Run(ctx)
-	webhookServer := snapshot.NewTLSServer(*webhookListen, *webhookCert, *webhookKey, snapshotCtrl.Handler())
-	go func() {
-		log.Printf("snapshot webhook listening on %s", *webhookListen)
-		if err := webhookServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("snapshot webhook listener exited: %v", err)
-		}
-	}()
+	// Workspace state changes (for example a pause taking a GKE PodSnapshot) must
+	// invalidate the resolve cache of every replica, so each one watches Workspaces
+	// instead of relying on an in-process callback.
+	go workspaces.WatchWorkspaces(ctx)
 	parse := func(value string) *url.URL {
 		parsed, err := url.Parse(value)
 		if err != nil {
@@ -150,7 +137,6 @@ func main() {
 		shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
 		defer stop()
 		_ = server.Shutdown(shutdown)
-		_ = webhookServer.Shutdown(shutdown)
 		if desktopServer != nil {
 			_ = desktopServer.Shutdown(shutdown)
 		}
