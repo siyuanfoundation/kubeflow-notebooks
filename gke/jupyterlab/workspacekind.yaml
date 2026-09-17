@@ -348,20 +348,29 @@ spec:
           - id: "gpu_t4_spot"
             spawner:
               displayName: "GPU T4 Spot"
-              description: "Pod with 1 T4 GPU"
+              description: "Pod with 1 T4 GPU (16 GB VRAM), 12 CPU, 40 GB RAM"
               labels:
                 - key: "accelerator"
                   value: "gpu"
+                - key: "cpu"
+                  value: "12"
+                - key: "memory"
+                  value: "40Gi"
             spec:
               nodeSelector:
                 cloud.google.com/compute-class: "gpu-t4-spot"
+              # Sized to land on n1-standard-16 (16 vCPU / 60 GB, ~51 GiB allocatable),
+              # the T4-capable N1 shape. The generous memory is not just for the model:
+              # GKE copies GPU state through the pod's process memory while taking and
+              # restoring a PodSnapshot, so peak pod memory during a pause exceeds what
+              # the workload uses at rest.
               resources:
                 requests:
-                  cpu: 2
-                  memory: 4Gi
+                  cpu: 12
+                  memory: 40Gi
                 limits:
-                  cpu: 2
-                  memory: 4Gi
+                  cpu: 12
+                  memory: 40Gi
                   nvidia.com/gpu: 1
           - id: "tpu"
             spawner:

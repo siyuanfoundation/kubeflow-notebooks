@@ -1,4 +1,5 @@
 # Kubeflow packages (GPU / CUDA)
+accelerate
 google-cloud-storage
 jax[cuda12]
 kfp==2.16.1
@@ -6,3 +7,7 @@ kubeflow[spark]==0.4.0
 matplotlib
 numpy
 pandas
+# Pinned to a major version so a rebuild cannot silently cross one: transformers 5
+# renamed from_pretrained's torch_dtype argument to dtype, and
+# examples/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
+transformers>=5,<6
