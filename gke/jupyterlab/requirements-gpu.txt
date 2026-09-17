@@ -1,13 +1,42 @@
 # Kubeflow packages (GPU / CUDA)
-accelerate
-google-cloud-storage
-jax[cuda12]
+#
+# Versions are pinned to the ones the GPU examples were verified against, so a
+# rebuild reproduces the stack that was tested rather than whatever pip resolves on
+# the day it runs.
+#
+# Only packages this layer actually adds are pinned. This layer shares a single
+# site-packages with the base image, so a pin here is not just a floor -- it is also
+# a ceiling that pip will happily downgrade a base-supplied package to reach. The
+# base ships torch 2.12.0+cu130 built against numpy 2.4.6; pinning numpy here would
+# eventually break torch. Control base-supplied packages via the digest pin in
+# Dockerfile.fast.gpu instead, which is what it is for.
+#
+# Pins cover direct dependencies only; transitive dependencies still float. Generate
+# a constraints file if you need byte-reproducible rebuilds.
+
+# Added by this layer (absent from the base image).
+accelerate==1.15.0
+# KNOWN MISMATCH: this asks for jax's cuda12 extra, but the base moved to CUDA 13
+# (torch 2.12.0+cu130, nvidia-cuda-runtime 13.0.96). The cuda12 extra therefore drags
+# in a second, complete CUDA 12 userspace alongside the base's CUDA 13 -- cublas,
+# cudnn, nccl 2.31.2 and friends, several GB of it. It works, because the 580.x driver
+# is backward compatible with CUDA 12, and nothing here is broken today. But it is
+# redundant, and note the GPU example only exercises torch, so jax-on-cuda12 over a
+# CUDA 13 base is not actually covered by any test. Switching to a cuda13 extra should
+# be done as its own change, with a jax workload run against the result.
+jax[cuda12]==0.11.1
+# transformers 5 renamed from_pretrained's torch_dtype argument to dtype, and
+# examples/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
+transformers==5.17.0
+
+# Already present in the base at these exact versions; declared so the dependency is
+# explicit, and so the kubeflow[spark] extra pulls in its Spark dependencies. Keep in
+# step with the base when bumping the digest -- a stale pin here silently downgrades it.
 kfp==2.16.1
 kubeflow[spark]==0.4.0
+
+# Base-supplied. Intentionally unpinned -- read the note above before adding a version.
+google-cloud-storage
 matplotlib
 numpy
 pandas
-# Pinned to a major version so a rebuild cannot silently cross one: transformers 5
-# renamed from_pretrained's torch_dtype argument to dtype, and
-# examples/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
-transformers>=5,<6
