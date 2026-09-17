@@ -277,9 +277,14 @@ echo "=================================================================="
 # `--variant gpu` would repoint cpu and tpu at an image that was never built. So a
 # variant we did not build keeps whatever the live cluster already references, and
 # only falls back to :latest-<variant> when there is nothing deployed to read.
+#
+# "Built" here means built AND pushed. A --no-push build produces tags that exist
+# nowhere but the local Docker daemon, so claiming one below would hand
+# deploy_standalone.sh a tag the cluster cannot pull. An unpushed variant is therefore
+# treated exactly like one we never built.
 variant_tag() {
   local variant="$1"
-  if [[ " ${VARIANTS[*]} " == *" ${variant} "* ]]; then
+  if [[ "${PUSH_IMAGE}" == "true" && " ${VARIANTS[*]} " == *" ${variant} "* ]]; then
     echo "${IMAGE_TAG}-${variant}"
     return
   fi
