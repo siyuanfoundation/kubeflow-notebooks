@@ -8,6 +8,13 @@
 # onto the image it was created with, and so a rebuild cannot change the runtime under
 # a running Workspace. build_jupyterlab.sh and deploy_standalone.sh set them for you.
 #
+# Because the tags are now immutable, imagePullPolicy is IfNotPresent rather than
+# Always. Always only earned its keep while these pointed at :latest-*, where the
+# contents could change behind a fixed tag. A pinned tag cannot, so Always just adds a
+# registry round-trip to every Pod start -- worth avoiding when the GPU image is ~7.5GB
+# and the node may already have it. If you ever repoint one of these at a mutable tag,
+# put Always back for that entry.
+#
 # Beware when rendering by hand: envsubst substitutes an unset variable with the empty
 # string, which yields `image: ".../jupyterlab:"` and a WorkspaceKind that cannot start
 # a Pod. Prefer the scripts, which print the tags they pin.
@@ -246,7 +253,7 @@ spec:
                   value: "cpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${CPU_IMAGE_TAG}"
-              imagePullPolicy: "Always"
+              imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"
                   port: 8888
@@ -267,7 +274,7 @@ spec:
                   value: "gpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${GPU_IMAGE_TAG}"
-              imagePullPolicy: "Always"
+              imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"
                   port: 8888
@@ -282,7 +289,7 @@ spec:
                   value: "tpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${TPU_IMAGE_TAG}"
-              imagePullPolicy: "Always"
+              imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"
                   port: 8888
