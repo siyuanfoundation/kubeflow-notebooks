@@ -63,15 +63,24 @@ GKE installs a `ValidatingAdmissionPolicy` (`gke-pod-snapshot-validating-admissi
 
 **Teardown ordering.** GKE's snapshot finalizer resolves a snapshot's storage location by following `PodSnapshot.spec.policyName` → `PodSnapshotPolicy` → `PodSnapshotStorageConfig`. If the policy is removed first, the finalizer cannot find the bucket: it releases the `PodSnapshot` object anyway and **silently leaves the checkpoint files in GCS**. The `PodSnapshotPolicy` therefore carries *no* `Workspace` `ownerReference` — otherwise the garbage collector would delete it the instant the `Workspace` went away, in a race with our own snapshot deletion. Instead `reconcileDeletedWorkspace` runs an ordered teardown:
 
-1. Delete the `Workspace`'s `PodSnapshot`s by label.
-2. Requeue every `snapshotDrainInterval` while any of them are still present (terminating snapshots emit no further watch events, so this is the one place the reconciler polls).
+1. Delete the `Workspace`'s `PodSnapshot`s by label — but only if at least one of them is not already terminating.
+2. Requeue every `snapshotDrainInterval` while any of them are still present.
 3. Once they are all gone, delete the `PodSnapshotPolicy` and `PodSnapshotManualTrigger`.
 
-Because the policy outlives the `Workspace`, it doubles as a tombstone: the policy informer's initial sync re-enqueues the absent `Workspace` on startup, so a teardown interrupted by a crash or a restart is finished automatically.
+The "only if not already terminating" guard in step 1 is load-bearing. A terminating `PodSnapshot` is not quiet: GKE's snapshot controller rewrites its status many times per second while the finalizer is held, and every one of those writes is a watch event that re-enqueues the `Workspace`. An unconditional delete on each pass turns that churn into a write loop — an early version of this addon issued over 200 `deletecollection` calls during a single eight-minute teardown. Deleting only when there is something new to delete makes the pass read-only in the common case, and the `snapshotDrainInterval` requeue is what guarantees progress if the delete is somehow lost.
+
+Because the policy outlives the `Workspace`, it doubles as a tombstone. The policy informer's initial sync re-enqueues the absent `Workspace` on startup, so a teardown interrupted by a crash or a restart is finished automatically; and once the policy is gone, `reconcileDeletedWorkspace` returns immediately, which is what stops the delete events the teardown itself generates from starting another round.
 
 The `PodSnapshotManualTrigger` is not subject to the PodSnapshot write restriction and is additionally owned by the `Workspace`.
 
-**Bounding step 2.** GKE removes the GCS objects within about a second of the delete and only *then* releases its finalizer, but the release itself is unreliable — one snapshot on the test cluster stayed terminating for over 16 minutes with a healthy origin node and `pod-snapshot-agent`. Waiting unconditionally would pin the policy (and a 10 s requeue) forever, so step 2 gives up after `snapshotDrainTimeout` (5 minutes) and retires the policy anyway. By that point the data has almost certainly been deleted; if it somehow has not, the `Delete` lifecycle rule that `deploy_standalone.sh` applies to the snapshot bucket (`SNAPSHOT_RETENTION_DAYS`, 14 days by default) is the backstop that bounds the cost. That lifecycle rule is what makes giving up acceptable, and it is why the bucket must keep it.
+**Bounding step 2.** GKE removes the GCS objects within about a second of the delete and only *then* releases its finalizer, but the release itself is unreliable. Releasing it is the job of the node-local `gps-agent` (DaemonSet `pod-snapshot-agent` in `gke-managed-pod-snapshots`, which only schedules onto gVisor nodes). On the test cluster a snapshot stayed terminating for 16m44s, and the agent logs explain why:
+
+- The addon deleted the two snapshots at `03:30:35` and `03:30:54`. The agent logged nothing but heartbeats for the next 14 minutes — it never picked up either deletion.
+- At `03:44:53` the gVisor node scaled down, because pausing the last `Workspace` on it had removed the only pod keeping it alive, and the agent was stopped with it.
+- The replacement agent started at `03:45:00` with `"This agent may have crashed and restarted as the lease was acquired forcefully"` and then `"skipping recovery upon agent (re)start as there are no pod snapshots found on node"`. Its recovery routine keys off node-local disk state, not the PodSnapshot API, so it never adopted the two terminating objects that named this node in `podsnapshot.gke.io/origin-node`.
+- Meanwhile the control-plane `system:pod-snapshot-controller` issued more than ten `podsnapshots.status.update` calls in under a second on those objects without releasing the finalizer. They only cleared once the node itself was deleted.
+
+This is not a rare fluke: pausing a `Workspace` removes its pod, which is frequently the last gVisor workload on the node, so scale-down and an agent restart are a *likely* consequence of the very operation that creates snapshots. Waiting unconditionally would pin the policy (and a 10 s requeue) forever, so step 2 gives up after `snapshotDrainTimeout` (5 minutes) and retires the policy anyway. By that point the data has almost certainly been deleted; if it somehow has not, the `Delete` lifecycle rule that `deploy_standalone.sh` applies to the snapshot bucket (`SNAPSHOT_RETENTION_DAYS`, 14 days by default) is the backstop that bounds the cost. That lifecycle rule is what makes giving up acceptable, and it is why the bucket must keep it.
 
 
 ### 2.3. Annotations & ReadinessGate Contract

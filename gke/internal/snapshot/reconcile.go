@@ -275,42 +275,69 @@ func (c *Controller) createManualTrigger(ctx context.Context, workspace *unstruc
 // So we delete the snapshots, wait for GKE to finish finalizing them, and only then
 // retire the policy.
 //
-// This also self-heals after downtime. Because the policy outlives the Workspace,
-// the policy informer's initial sync re-enqueues the (now absent) Workspace on
-// startup, which brings us back here to finish a teardown that was interrupted.
+// The policy doubles as the teardown marker. While it exists there is work to do;
+// once it is gone this is a no-op, which is what stops the delete events we generate
+// here from feeding back into another round. It also self-heals after downtime:
+// because the policy outlives the Workspace, the policy informer's initial sync
+// re-enqueues the absent Workspace on startup and we resume an interrupted teardown.
 func (c *Controller) reconcileDeletedWorkspace(ctx context.Context, namespace, name string) (time.Duration, error) {
-	if err := c.deleteWorkspaceSnapshots(ctx, namespace, name); err != nil {
+	_, err := c.getResource(ctx, podSnapshotPolicyGVR, c.policyLister, namespace, policyNameFor(name))
+	if apierrors.IsNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
 		return 0, err
 	}
+
 	draining, err := c.drainingWorkspaceSnapshots(ctx, namespace, name)
 	if err != nil {
 		return 0, err
 	}
-	if waited, stillDraining := drainProgress(draining); stillDraining {
-		if waited < snapshotDrainTimeout {
-			// GKE is still finalizing; keep the policy alive so it can find the bucket.
-			return snapshotDrainInterval, nil
+	if !allTerminating(draining) {
+		// Either snapshots we have not asked about yet, or none visible at all. One
+		// delete call covers both, and covers a cold cache that would otherwise let
+		// us retire the policy while snapshots still depend on it.
+		if err := c.deleteWorkspaceSnapshots(ctx, namespace, name); err != nil {
+			return 0, err
 		}
-		// GKE has had long enough. It removes the GCS objects within seconds of the
-		// delete and only then releases its finalizer, so a snapshot still held after
-		// snapshotDrainTimeout means the finalizer is wedged, not that data is at
-		// risk. Stop pinning the policy rather than leaking it forever. In the worst
-		// case the files really were missed, and the Delete lifecycle rule that
-		// deploy_standalone.sh puts on the bucket (SNAPSHOT_RETENTION_DAYS, 14 days by
-		// default) is the backstop that bounds the cost.
-		logf("reconciler", "PodSnapshots for Workspace %s/%s have been terminating for %s; retiring the PodSnapshotPolicy anyway", namespace, name, waited.Round(time.Second))
+		if len(draining) == 0 {
+			return 0, c.retirePolicy(ctx, namespace, name)
+		}
+		return snapshotDrainInterval, nil
 	}
 
+	// Everything is already terminating, so do not re-issue the delete. GKE rewrites a
+	// terminating PodSnapshot's status many times per second and each of those writes
+	// is a watch event that lands us back here; deleting again on every pass turns
+	// that churn into a write loop against the API server.
+	waited, _ := drainProgress(draining)
+	if waited < snapshotDrainTimeout {
+		// Keep the policy alive so GKE's finalizer can still resolve the bucket.
+		return snapshotDrainInterval, nil
+	}
+	// GKE has had long enough. It removes the GCS objects within seconds of the delete
+	// and only then releases its finalizer, so a snapshot still held after
+	// snapshotDrainTimeout means the finalizer is wedged, not that data is at risk.
+	// Stop pinning the policy rather than leaking it forever. In the worst case the
+	// files really were missed, and the Delete lifecycle rule that deploy_standalone.sh
+	// puts on the bucket (SNAPSHOT_RETENTION_DAYS, 14 days by default) bounds the cost.
+	logf("reconciler", "PodSnapshots for Workspace %s/%s have been terminating for %s; retiring the PodSnapshotPolicy anyway", namespace, name, waited.Round(time.Second))
+	return 0, c.retirePolicy(ctx, namespace, name)
+}
+
+// retirePolicy removes the last traces of a Workspace once its snapshots no longer
+// need the policy to resolve their storage location.
+func (c *Controller) retirePolicy(ctx context.Context, namespace, name string) error {
 	logf("reconciler", "Workspace %s/%s is gone and its snapshots are retired; removing PodSnapshotPolicy", namespace, name)
 	for gvr, resourceName := range map[schema.GroupVersionResource]string{
 		podSnapshotPolicyGVR:        policyNameFor(name),
 		podSnapshotManualTriggerGVR: triggerNameFor(name),
 	} {
 		if err := c.dynamic.Resource(gvr).Namespace(namespace).Delete(ctx, resourceName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return 0, err
+			return err
 		}
 	}
-	return 0, nil
+	return nil
 }
 
 // disownPolicy removes a Workspace ownerReference from a PodSnapshotPolicy written
@@ -365,6 +392,21 @@ func (c *Controller) drainingWorkspaceSnapshots(ctx context.Context, namespace, 
 		}
 	}
 	return snapshots, nil
+}
+
+// allTerminating reports whether every snapshot has already been asked to go away.
+// An empty set is deliberately *not* "all terminating": we still want one delete
+// call before concluding there is nothing left to wait for.
+func allTerminating(snapshots []*unstructured.Unstructured) bool {
+	if len(snapshots) == 0 {
+		return false
+	}
+	for _, snapshot := range snapshots {
+		if snapshot.GetDeletionTimestamp() == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // drainProgress reports whether any snapshots are left and, if so, how long the most

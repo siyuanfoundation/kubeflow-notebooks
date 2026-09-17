@@ -421,6 +421,47 @@ func TestReconcileDeletesSnapshotsWhenWorkspaceIsGone(t *testing.T) {
 		}
 		assertDeleted(t, dynamicClient.Actions(), podSnapshotPolicyGVR, true)
 	})
+	// Regression test. GKE rewrites a terminating PodSnapshot's status many times a
+	// second, and every one of those writes is a watch event that re-enqueues the
+	// Workspace. Deleting again on each pass turned that churn into a write loop: a
+	// single teardown produced 200+ deletecollection calls in the audit log.
+	t.Run("re-reconciling a terminating snapshot issues no further deletes", func(t *testing.T) {
+		terminating := newSnapshot()
+		deletedAt := metav1.NewTime(time.Now())
+		terminating.SetDeletionTimestamp(&deletedAt)
+		terminating.SetFinalizers([]string{"podsnapshot.gke.io/podsnapshot-finalizer"})
+		controller, _, dynamicClient := newTestController(t, terminating, policy())
+
+		for pass := range 5 {
+			requeue, err := controller.reconcileWorkspace(context.Background(), key)
+			if err != nil {
+				t.Fatalf("reconcile pass %d failed: %v", pass, err)
+			}
+			if requeue != snapshotDrainInterval {
+				t.Fatalf("pass %d requeue = %v, want %v", pass, requeue, snapshotDrainInterval)
+			}
+		}
+		if got := countDeletes(dynamicClient.Actions(), podSnapshotGVR); got != 0 {
+			t.Fatalf("issued %d deletes against already-terminating snapshots, want 0", got)
+		}
+		assertDeleted(t, dynamicClient.Actions(), podSnapshotPolicyGVR, false)
+	})
+
+	// The policy is the teardown marker. Once it is retired the delete events we
+	// generated ourselves must not start another round.
+	t.Run("teardown is a no-op once the policy is retired", func(t *testing.T) {
+		controller, _, dynamicClient := newTestController(t, newSnapshot())
+
+		requeue, err := controller.reconcileWorkspace(context.Background(), key)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+		if requeue != 0 {
+			t.Fatalf("requeue = %v, want 0 once the teardown has finished", requeue)
+		}
+		assertDeleted(t, dynamicClient.Actions(), podSnapshotGVR, false)
+	})
+
 	t.Run("wedged finalizer eventually releases the policy", func(t *testing.T) {
 		// GKE removes the GCS objects within seconds and only then drops its
 		// finalizer, so a snapshot still terminating this long after its deletion is
@@ -444,18 +485,24 @@ func TestReconcileDeletesSnapshotsWhenWorkspaceIsGone(t *testing.T) {
 
 func assertDeleted(t *testing.T, actions []clienttesting.Action, gvr schema.GroupVersionResource, want bool) {
 	t.Helper()
-	got := false
+	if got := countDeletes(actions, gvr) > 0; got != want {
+		t.Fatalf("deleted %s = %v, want %v", gvr.Resource, got, want)
+	}
+}
+
+// countDeletes reports how many delete calls were made against a resource. Tests use
+// the count, not just the presence, to pin down write amplification during teardown.
+func countDeletes(actions []clienttesting.Action, gvr schema.GroupVersionResource) int {
+	deletes := 0
 	for _, action := range actions {
 		if action.GetResource() != gvr {
 			continue
 		}
 		if verb := action.GetVerb(); verb == "delete" || verb == "delete-collection" {
-			got = true
+			deletes++
 		}
 	}
-	if got != want {
-		t.Fatalf("deleted %s = %v, want %v", gvr.Resource, got, want)
-	}
+	return deletes
 }
 
 // The steady state (a healthy, running Workspace) must not write anything.
