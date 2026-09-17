@@ -2,6 +2,9 @@ apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
   name: jupyterlab
+  annotations:
+    podsnapshot.gke.kubeflow.org/enabled: "true"
+    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
 spec:
   spawner:
     displayName: "JupyterLab Notebook"
@@ -287,8 +290,23 @@ spec:
                   port: 8888
       podConfig:
         spawner:
-          default: "medium_cpu"
+          default: "small_cpu"
         values:
+          - id: "tiny_cpu"
+            spawner:
+              displayName: "Tiny CPU"
+              description: "Pod with 0.1 CPU, 128 Mb RAM"
+              labels:
+                - key: "cpu"
+                  value: "100m"
+                - key: "memory"
+                  value: "128Mi"
+            spec:
+              affinity: {}
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
           - id: "medium_cpu"
             spawner:
               displayName: "Medium CPU"

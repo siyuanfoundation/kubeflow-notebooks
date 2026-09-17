@@ -192,6 +192,16 @@ func (access *KubernetesAccess) doResolve(ctx context.Context, cacheKey resolveC
 	return target, err
 }
 
+func (access *KubernetesAccess) InvalidateWorkspaceCache(namespace, name string) {
+	access.cacheMu.Lock()
+	defer access.cacheMu.Unlock()
+	for key := range access.cache {
+		if key.namespace == namespace && key.name == name {
+			delete(access.cache, key)
+		}
+	}
+}
+
 func (access *KubernetesAccess) resolveUncached(ctx context.Context, identity Identity, namespace, name, portID string) (Target, error) {
 	allowed, err := access.allowed(ctx, identity, namespace, "get", name)
 	if err != nil {
@@ -206,6 +216,9 @@ func (access *KubernetesAccess) resolveUncached(ctx context.Context, identity Id
 	}
 	if workspace.GetUID() == "" || workspace.GetDeletionTimestamp() != nil {
 		return Target{}, fmt.Errorf("workspace not available")
+	}
+	if workspace.GetAnnotations()["podsnapshot.gke.kubeflow.org/checkpoint-state"] == "Checkpointing" {
+		return Target{}, fmt.Errorf("workspace pausing (taking pod snapshot)")
 	}
 	var spec struct {
 		Paused      bool   `json:"paused"`

@@ -10,3 +10,73 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gke-snapshot-webhook-service
+spec:
+  type: ClusterIP
+  selector:
+    app: gke-access-proxy
+  ports:
+    - name: https
+      port: 443
+      targetPort: webhook
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gke-snapshot-webhook-cert
+spec:
+  dnsNames:
+    - gke-snapshot-webhook-service.kubeflow-workspaces.svc
+    - gke-snapshot-webhook-service.kubeflow-workspaces.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: workspaces-selfsigned-issuer
+  secretName: gke-snapshot-webhook-cert
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: gke-workspace-snapshot-mutating-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: kubeflow-workspaces/gke-snapshot-webhook-cert
+webhooks:
+  - name: mutate-workspace.podsnapshot.gke.kubeflow.org
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Ignore
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: gke-snapshot-webhook-service
+        namespace: kubeflow-workspaces
+        path: /mutate-workspace
+        port: 443
+    rules:
+      - apiGroups: ["kubeflow.org"]
+        apiVersions: ["v1beta1"]
+        operations: ["UPDATE"]
+        resources: ["workspaces"]
+  - name: mutate-pod.podsnapshot.gke.kubeflow.org
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Ignore
+    timeoutSeconds: 10
+    objectSelector:
+      matchExpressions:
+        - key: notebooks.kubeflow.org/workspace-name
+          operator: Exists
+    clientConfig:
+      service:
+        name: gke-snapshot-webhook-service
+        namespace: kubeflow-workspaces
+        path: /mutate-pod
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]

@@ -59,8 +59,10 @@ export BUILD_JUPYTERLAB_IMAGES="${BUILD_JUPYTERLAB_IMAGES:-true}"
 export KUBE_CLIENT_QPS="${KUBE_CLIENT_QPS:-100}"
 export KUBE_CLIENT_BURST="${KUBE_CLIENT_BURST:-200}"
 
-# GCS Bucket for distributed_tpu_example.ipynb
+# GCS Bucket for distributed_tpu_example.ipynb (Spark ETL & TPU Training data)
 export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
+# Dedicated GCS Bucket for GKE Pod Snapshots (stateful Workspace Pause & Resume)
+export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
 
 if [[ -z "${PROJECT}" ]]; then
   echo "ERROR: PROJECT / PROJECT_ID is not set. Please run: export PROJECT=your-gcp-project-id" >&2
@@ -82,6 +84,7 @@ echo "  PILOT_USERS:         ${PILOT_USERS}"
 echo "  TENANT_NAMESPACE:    ${TENANT_NAMESPACE}"
 echo "  REGISTRY:            ${REGISTRY}"
 echo "  GCS_BUCKET:          ${GCS_BUCKET}"
+echo "  SNAPSHOT_GCS_BUCKET: ${SNAPSHOT_GCS_BUCKET}"
 echo "  INSTALL_TRAINER:     ${INSTALL_TRAINER}"
 echo "  INSTALL_SPARK:       ${INSTALL_SPARK_OPERATOR}"
 echo "=================================================================="
@@ -325,6 +328,7 @@ jq -n \
   --arg client "${IAP_CLIENT_ID}" \
   --arg secret "${IAP_SECRET_NAME}" \
   --arg tenant "${TENANT_NAMESPACE}" \
+  --arg snapshotBucket "${SNAPSHOT_GCS_BUCKET}" \
   --argjson qps "${KUBE_CLIENT_QPS}" \
   --argjson burst "${KUBE_CLIENT_BURST}" \
   --arg proxy "${PROXY_IMAGE}" \
@@ -333,16 +337,16 @@ jq -n \
   --arg backend "${BACKEND_IMAGE}" \
   '{controlPlaneCIDR:$cidr,hostname:$host,desktopHostname:$desktopHost,certificateMap:$certificateMap,
     addressName:$addressName,iapClientID:$client,iapSecretName:$secret,
-    iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,tenants:[$tenant],
+    iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,snapshotGCSBucket:$snapshotBucket,tenants:[$tenant],
     images:{proxy:$proxy,frontend:$frontend,controller:$controller,backend:$backend}}' \
   > "${SCRIPT_DIR}/deployment.local.json"
 
 rm -rf "${SCRIPT_DIR}/rendered/bootstrap"
 make -C "${SCRIPT_DIR}" plan CONFIG=deployment.local.json OUTPUT=rendered/bootstrap
 
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
   -f "${SCRIPT_DIR}/rendered/bootstrap/namespaces.json"
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
   -f "${SCRIPT_DIR}/rendered/bootstrap/isolation.json"
 
 if [[ -n "${OAUTH_FILE}" && -f "${OAUTH_FILE}" && -n "${IAP_SECRET_NAME}" ]]; then
@@ -355,14 +359,14 @@ fi
 
 jq '{apiVersion,kind,items:[.items[]|select(.kind=="CustomResourceDefinition")]}' \
   "${SCRIPT_DIR}/rendered/bootstrap/applications.json" | \
-  kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke -f -
+  kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke -f -
 
 kubectl --context="${CONTEXT}" wait --for=condition=Established --timeout=2m \
   crd/workspaces.kubeflow.org crd/workspacekinds.kubeflow.org
 
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
   -f "${SCRIPT_DIR}/rendered/bootstrap/applications.json"
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
   -f "${SCRIPT_DIR}/rendered/bootstrap/edge.json"
 
 # ==============================================================================
@@ -406,7 +410,7 @@ jq --arg audience "${IAP_AUDIENCE}" '.iapAudience=$audience' \
   "${SCRIPT_DIR}/deployment.local.json" > "${SCRIPT_DIR}/rendered/deployment.ready.json"
 make -C "${SCRIPT_DIR}" plan CONFIG=rendered/deployment.ready.json OUTPUT=rendered/ready
 
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
   -f "${SCRIPT_DIR}/rendered/ready/applications.json"
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
 
@@ -503,19 +507,46 @@ if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then
 fi
 
 # ==============================================================================
-# Step 9: Configure GCS Bucket & Workload Identity IAM Bindings
+# Step 9: Configure Data & Snapshot GCS Buckets & Workload Identity IAM Bindings
 # ==============================================================================
 echo "=================================================================="
-echo "Step 9: Configuring GCS Bucket & Workload Identity IAM Access..."
+echo "Step 9: Configuring Data & Snapshot GCS Buckets & Workload Identity..."
 echo "=================================================================="
-if ! gcloud storage buckets describe "gs://${GCS_BUCKET}" --project="${PROJECT}" >/dev/null 2>&1; then
-  echo "Creating GCS bucket gs://${GCS_BUCKET}..."
-  gcloud storage buckets create "gs://${GCS_BUCKET}" --location="${REGION}" --project="${PROJECT}" || true
-fi
+for bucket in "${GCS_BUCKET}" "${SNAPSHOT_GCS_BUCKET}"; do
+  if ! gcloud storage buckets describe "gs://${bucket}" --project="${PROJECT}" >/dev/null 2>&1; then
+    echo "Creating GCS bucket gs://${bucket}..."
+    gcloud storage buckets create "gs://${bucket}" --location="${REGION}" --project="${PROJECT}" || true
+  fi
+  gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
+    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+    --role="roles/storage.objectUser" >/dev/null || true
+  gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
+    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+    --role="roles/storage.bucketViewer" >/dev/null || true
+done
 
-gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+# Grant GKE Service Agent roles/storage.objectUser on SNAPSHOT_GCS_BUCKET so
+# podsnapshot.gke.io/podsnapshot-finalizer can delete consumed/expired snapshot files in GCS
+gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com" \
   --role="roles/storage.objectUser" >/dev/null || true
+
+# Configure a GCS Object Lifecycle Delete rule (default 14 days) on SNAPSHOT_GCS_BUCKET
+# as a hard billing backstop against orphaned snapshots
+export SNAPSHOT_RETENTION_DAYS="${SNAPSHOT_RETENTION_DAYS:-14}"
+cat <<EOF > /tmp/snapshot-lifecycle.json
+{
+  "rule": [
+    {
+      "action": {"type": "Delete"},
+      "condition": {"age": ${SNAPSHOT_RETENTION_DAYS}}
+    }
+  ]
+}
+EOF
+gcloud storage buckets update "gs://${SNAPSHOT_GCS_BUCKET}" \
+  --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT}" >/dev/null || true
+rm -f /tmp/snapshot-lifecycle.json
 
 echo "=================================================================="
 echo "✅ Standalone Kubeflow Workspaces Deployment Complete!"
@@ -525,7 +556,8 @@ echo "  VS Code Tokens:    https://${NOTEBOOK_HOST}/workspaces/connections"
 echo "  Desktop Endpoint:  https://${DESKTOP_HOST}/"
 echo "  Admitted Users:    ${PILOT_USERS}"
 echo "  Tenant Namespace:  ${TENANT_NAMESPACE}"
-echo "  GCS Bucket:        gs://${GCS_BUCKET}"
+echo "  Data GCS Bucket:   gs://${GCS_BUCKET}"
+echo "  Snapshot Bucket:   gs://${SNAPSHOT_GCS_BUCKET}"
 echo ""
 echo "Note: Certificate Manager certificates '${CERTIFICATE_NAME}' and '${CERTIFICATE_NAME}-desktop' use Load Balancer"
 echo "authorization and may take 5-15 minutes after Gateway attachment to reach ACTIVE state."

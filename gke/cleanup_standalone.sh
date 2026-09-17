@@ -15,15 +15,28 @@ export ADDRESS_NAME="${ADDRESS_NAME:-notebooks-gke-global}"
 export CERTIFICATE_NAME="${CERTIFICATE_NAME:-notebooks-gke}"
 export CERTIFICATE_MAP="${CERTIFICATE_MAP:-notebooks-gke}"
 export CONTEXT="${CONTEXT:-gke_${PROJECT}_${LOCATION}_${CLUSTER}}"
+export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
+export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
 export DELETE_EDGE_RESOURCES="${DELETE_EDGE_RESOURCES:-false}"
+export DELETE_SNAPSHOT_BUCKET="${DELETE_SNAPSHOT_BUCKET:-false}"
 
 echo "=================================================================="
 echo "Cleaning up Standalone Kubeflow Workspaces on GKE (${CLUSTER})..."
 echo "=================================================================="
 
-# 1. Remove tenant workloads
-echo "Deleting tenant workspaces, trainjobs, sparkapplications, and deployments in ${TENANT_NAMESPACE}..."
+# 0. Remove Snapshot Mutating Webhook first so Workspace/Pod teardown is never intercepted
+kubectl --context="${CONTEXT}" delete mutatingwebhookconfiguration gke-workspace-snapshot-mutating-webhook --ignore-not-found || true
+kubectl --context="${CONTEXT}" -n kubeflow-workspaces delete certificate gke-snapshot-webhook-cert --ignore-not-found || true
+kubectl --context="${CONTEXT}" -n kubeflow-workspaces delete secret gke-snapshot-webhook-cert --ignore-not-found || true
+
+# 1. Remove tenant workloads and GKE Pod Snapshot resources
+echo "Deleting tenant workspaces, podsnapshots, trainjobs, sparkapplications, and deployments in ${TENANT_NAMESPACE}..."
 kubectl --context="${CONTEXT}" delete workspaces --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podsnapshotmanualtriggers.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podsnapshots.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podsnapshotpolicies.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podsnapshotstorageconfigs.podsnapshot.gke.io kubeflow-pod-snapshot-storage-config --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete configmap jupyter-ipc-config -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete trainjobs --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete sparkconnects --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete sparkapplications --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
@@ -53,6 +66,11 @@ fi
 kubectl --context="${CONTEXT}" delete validatingadmissionpolicybinding notebooks-gke-pilot-workspaces --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete validatingadmissionpolicy notebooks-gke-pilot-workspaces --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete namespace notebooks-connections --ignore-not-found || true
+
+if [[ "${DELETE_SNAPSHOT_BUCKET}" == "true" ]]; then
+  echo "Deleting GKE Pod Snapshot GCS bucket gs://${SNAPSHOT_GCS_BUCKET}..."
+  gcloud storage rm --recursive "gs://${SNAPSHOT_GCS_BUCKET}" --project="${PROJECT}" --quiet || true
+fi
 
 if [[ "${DELETE_EDGE_RESOURCES}" == "true" ]]; then
   echo "Deleting Certificate Manager certificate map and Global IP (${ADDRESS_NAME})..."

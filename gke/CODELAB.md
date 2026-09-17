@@ -24,7 +24,8 @@ export LOCATION="us-central1-c"             # Cluster zone or region
 export REGION="us-central1"                 # Artifact Registry & GCS region
 export PILOT_USERS="user1@example.com,user2@example.com"  # Comma- or space-separated Google emails to grant IAP & RBAC access
 export TENANT_NAMESPACE="team-a"            # Tenant namespace
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
+export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"              # Workload data bucket (Spark ETL & TPU training)
+export SNAPSHOT_GCS_BUCKET="${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GKE Pod Snapshot bucket
 ```
 
 ### Optional Configuration Options
@@ -112,10 +113,70 @@ When finished, cleanly remove all deployed workloads and controllers:
 
 # Part II: Maintainer Pilot Acceptance Record
 
+## 2026-09-16 Stateful Workspace Pause & Resume via GKE Pod Snapshots (Zero-Core-Change Webhook & ReadinessGate Architecture)
+
+- **Cluster**: `pilot-gke-dev` / `us-west1` / `kubeflow-notebooks`, GKE `1.35.7-gke.1222000`, gVisor Sandbox node pool (`gke-kubeflow-noteboo-cpu-autoscaling--26ba0686-hg8p`), GKE Pod Snapshot controller (`podsnapshot.gke.io/v1alpha1`).
+- **Tenant Namespace**: `kubeflow-user`, Test Workspace: `ws-snapshot-test` (`Pod`: `ws-ws-snapshot-test-x2wbv-0`), Snapshot GCS Bucket: `gs://kubeflow-user-snapshots-bucket/kubeflow-notebooks`.
+- **Architecture**: Implemented entirely in `gke/` ([`internal/snapshot/snapshot.go`](internal/snapshot/snapshot.go), [`internal/access/kubernetes.go`](internal/access/kubernetes.go), [`cmd/access-proxy/main.go`](cmd/access-proxy/main.go)) using two mutating webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`podsnapshot.gke.kubeflow.org/active`), and a background snapshot reconciler inside `gke-access-proxy`—requiring **zero code changes** to upstream `workspaces/controller`, `workspaces/backend`, or `workspaces/frontend`.
+
+### Observed End-to-End Stateful Pause/Resume Verification
+
+| Lifecycle Phase | Observed Kubernetes & Runtime State |
+| --- | --- |
+| **1. Workspace Creation & Pod Mutation** | `mutate-pod` intercepted `ws-ws-snapshot-test-x2wbv-0`, injected `runtimeClassName: gvisor`, `readinessGates: [{conditionType: "podsnapshot.gke.kubeflow.org/active"}]`, and mounted `ConfigMap/jupyter-ipc-config`. Reconciler created `PodSnapshotStorageConfig/kubeflow-pod-snapshot-storage-config`, `PodSnapshotPolicy/ws-ws-snapshot-test-policy`, and set `READINESS GATES: 1/1` (`STATE: Running`). |
+| **2. In-Memory Kernel State Initialization** | Created Python 3 kernel `50ccf96b-280f-4637-9bad-d2d05ae3146e` over Unix domain IPC (`"transport": "ipc"`, `/tmp/jupyter_runtime/kernel-50ccf96b-280f-4637-9bad-d2d05ae3146e-ipc`) and executed `a = 100; b = 200; c = a * b` (`VALUE_OF_C= 20000`). |
+| **3. Pause Interception & Option 1 UI/Network Lockout** | Patched `Workspace/ws-snapshot-test` with `{"spec":{"paused":true}}`. Within `<1s`, `mutate-workspace` rewrote `spec.paused` to `false`, set `podsnapshot.gke.kubeflow.org/checkpoint-state: Checkpointing`, and flipped `podsnapshot.gke.kubeflow.org/active` and `PodReady` to `False` (`READINESS GATES: 0/1`). `Workspace.status.state` immediately exited `Running`, disabling UI **Connect**, hiding **Stop**, blocking premature **Start**, and draining open sockets. |
+| **4. GKE Checkpoint & Scale-to-Zero** | After the 3s `SocketSettleGracePeriod`, the reconciler created `PodSnapshotManualTrigger/ws-ws-snapshot-test-trigger`. GKE produced `PodSnapshot/e22faec7-c1ed-4f19-8548-b1f148fdd575` (`AllSnapshotsAvailable`), and the reconciler patched `Workspace/ws-snapshot-test` with `last-checkpoint-name: e22faec7-c1ed-4f19-8548-b1f148fdd575`, `checkpoint-state: Ready`, and `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`. |
+| **5. Stateful Restore & Cleanup** | Patched `Workspace/ws-snapshot-test` with `{"spec":{"paused":false}}`. `mutate-pod` injected `podsnapshot.gke.io/ps-name: e22faec7-c1ed-4f19-8548-b1f148fdd575` on `ws-ws-snapshot-test-x2wbv-0`. Kubelet logged `Normal GKEPodSnapshotting: Successfully restored the pod from PodSnapshot kubeflow-user/e22faec7-c1ed-4f19-8548-b1f148fdd575`. Querying kernel `50ccf96b-280f-4637-9bad-d2d05ae3146e` returned `RESTORED IN-MEMORY VARIABLES: a=100, b=200, c=20000`, and consumed `PodSnapshot` / `PodSnapshotManualTrigger` CRs were deleted. |
+
+### Hiccups Encountered & How They Were Resolved
+
+1. **Cluster-Scoped vs. Namespace-Scoped GKE `PodSnapshot*` CRDs (`the server could not find the requested resource`)**:
+   - **Hiccup**: Initially treated all four `podsnapshot.gke.io/v1alpha1` resources as namespace-scoped and invoked `c.dynamicClient.Resource(gvrStorageConfig).Namespace(ns)`. The Kubernetes API server returned `NotFound (the server could not find the requested resource)` when reconciling `PodSnapshotStorageConfig`.
+   - **Root Cause**: Inspection of the GKE CRDs (`kubectl get crd -o custom-columns=NAME:.metadata.name,SCOPE:.spec.scope | grep podsnapshot`) revealed an asymmetric scope model:
+     - `podsnapshotstorageconfigs.podsnapshot.gke.io` is **`Cluster`-scoped**.
+     - `podsnapshotpolicies.podsnapshot.gke.io`, `podsnapshotmanualtriggers.podsnapshot.gke.io`, and `podsnapshots.podsnapshot.gke.io` are **`Namespaced`**.
+   - **Fix**: Updated `ensureStorageConfig` in [`internal/snapshot/snapshot.go`](internal/snapshot/snapshot.go) to reconcile a single cluster-scoped `PodSnapshotStorageConfig` (`kubeflow-pod-snapshot-storage-config`) without `.Namespace(...)`, while reconciling per-workspace `PodSnapshotPolicy` and `PodSnapshotManualTrigger` objects inside the tenant namespace.
+
+2. **Workload Identity GCS Permission Validation Failure on `_perm_check` (`403 AccessDenied` in `PodSnapshotPolicy`)**:
+   - **Hiccup**: After creating `PodSnapshotStorageConfig` and `PodSnapshotPolicy`, the policy remained in `Ready=False` (`Reason: TriggerFailed`) with:
+     `failed to validate GCS access in storage config "kubeflow-pod-snapshot-storage-config": storage.objects.create validation failed for path gs://kubeflow-user-snapshots-bucket/kubeflow-notebooks/_perm_check with error: googleapi: Error 403: Caller does not have storage.objects.create access to the Google Cloud Storage object., forbidden`.
+   - **Root Cause**: The GKE Pod Snapshot controller validates GCS bucket access by impersonating the **tenant namespace's Workload Identity `principalSet`** (`principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<PROJECT_ID>.svc.id.goog/namespace/<TENANT_NAMESPACE>`) and writing a probe object (`_perm_check`) before admitting the policy. Granting IAM only to the node service account or a single Kubernetes ServiceAccount is insufficient.
+   - **Fix**: Bound both `roles/storage.objectUser` and `roles/storage.bucketViewer` on `gs://${SNAPSHOT_GCS_BUCKET}` to `principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}` in [`deploy_standalone.sh`](deploy_standalone.sh).
+
+3. **Dynamic StatefulSet & Pod Naming (`ws-<workspace-name>-<random5>-0` vs. `<workspace-name>-0`)**:
+   - **Hiccup**: During the first pause test, `flipPodReadinessGate` and `PodSnapshotManualTrigger` attempted to look up Pod `<workspace-name>-0` (`ws-snapshot-test-0`) and failed with `pods "ws-snapshot-test-0" not found`.
+   - **Root Cause**: Upstream `workspaces-controller` creates the backing `StatefulSet` using `metadata.generateName: ws-<workspace-name>-`, which produces a random 5-character hash suffix in the StatefulSet name (`ws-ws-snapshot-test-x2wbv`) and Pod name (`ws-ws-snapshot-test-x2wbv-0`).
+   - **Fix**: Added `getWorkspacePod(ctx, namespace, wsName)` in [`internal/snapshot/snapshot.go`](internal/snapshot/snapshot.go) to discover the active Pod dynamically via label selector `notebooks.kubeflow.org/workspace-name=<wsName>` rather than assuming a deterministic Pod name.
+
+4. **Pilot `ValidatingAdmissionPolicy` Blocking `Workspace.spec.podTemplate.podMetadata` vs. Direct `Pod` Webhook Injection**:
+   - **Hiccup**: The security hardening `ValidatingAdmissionPolicy` (`notebooks-pilot-workspace`) explicitly forbids setting `.spec.podTemplate.podMetadata` on `Workspace` CRs (`object.spec.podTemplate.?podMetadata.orValue({}) == {}`) so untrusted users cannot inject arbitrary Pod annotations/labels via the `Workspace` spec.
+   - **Fix**: By intercepting `Pod` `CREATE` directly in `POST /mutate-pod` (`HandlePodMutate`) after the `Workspace` CR has already passed admission and `workspaces-controller` has rendered the `Pod`, `gke-access-proxy` injects `runtimeClassName: gvisor`, `readinessGates`, `jupyter-ipc-config`, and `podsnapshot.gke.io/ps-name: <snapshot-name>` directly onto the `Pod` without touching `Workspace.spec.podTemplate.podMetadata` or relaxing `ValidatingAdmissionPolicy`.
+
+5. **Dataplane V2 `NetworkPolicy` Blocking Control-Plane Webhook Calls to Port `9443`**:
+   - **Hiccup**: Hosting the mutating webhooks inside `gke-access-proxy` on TLS port `:9443` initially risked admission timeouts because `NetworkPolicy/gke-access-proxy` only permitted ingress on TCP `8080` (HTTP proxy) and `8081` (metrics).
+   - **Fix**: Opened TCP port `9443` in both `Service/gke-access-proxy` ([`manifests/proxy/service.yaml`](manifests/proxy/service.yaml)) and `NetworkPolicy/gke-access-proxy` ([`internal/deploy/render.go`](internal/deploy/render.go)) and provisioned its TLS certificate via `cert-manager` (`Certificate/gke-snapshot-webhook-cert` with `cert-manager.io/inject-ca-from` on `MutatingWebhookConfiguration/gke-workspace-snapshot-mutating-webhook`).
+
+6. **gVisor `epoll` / Loopback TCP Socket Constraints During Snapshot & Restore**:
+   - **Hiccup**: Under gVisor (`runtimeClassName: gvisor`), default Jupyter `pyzmq` TCP loopback sockets (`127.0.0.1`) and `epoll` selectors can hang across checkpoint/restore boundaries, and open external proxy WebSocket connections can interfere with clean checkpointing.
+   - **Fix**:
+     - `HandlePodMutate` automatically ensures and mounts `ConfigMap/jupyter-ipc-config` (`/etc/jupyter/jupyter_server_config.py`) in every tenant namespace, configuring `asyncio.DefaultEventLoopPolicy` to use `selectors.PollSelector()` and setting `c.KernelManager.transport = 'ipc'` (Unix domain sockets under `/tmp/jupyter_runtime`).
+     - `HandleWorkspaceMutate` immediately flips the custom `readinessGate` (`podsnapshot.gke.kubeflow.org/active: False`) and `PodReady: False`, invalidates the proxy cache, and waits `SocketSettleGracePeriod` (`3s`) so `Endpoints`/`EndpointSlices` drop the Pod and open sockets drain before `PodSnapshotManualTrigger` is created.
+
+7. **`PodSnapshot` Finalizer Stuck in `Deleting` (`403 Forbidden` on `storage.objects.list` for GKE Service Agent) & GCS Storage Accumulation**:
+   - **Hiccup**: When `gke-access-proxy` deleted the consumed `PodSnapshot` CR (`e22faec7-c1ed-4f19-8548-b1f148fdd575`) after restore, the `PodSnapshot` stayed stuck in `STATUS: Deleting` with `finalizers: [podsnapshot.gke.io/podsnapshot-finalizer]` and message:
+     `Failed to delete the snapshot files in GCS: failed to iterate objects in GCS path ...: googleapi: Error 403: service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com does not have storage.objects.list access to the Google Cloud Storage bucket.`
+   - **Root Cause**: While the node-level checkpoint and restore agent accesses GCS using the tenant namespace's **Workload Identity `principalSet`**, the control-plane `PodSnapshot` garbage-collection finalizer (`podsnapshot.gke.io/podsnapshot-finalizer`) runs as the **GKE Service Agent** (`service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com`). Without `roles/storage.objectUser` granted to the GKE Service Agent, `PodSnapshot` finalizers cannot list/delete GCS files and old snapshots accumulate in GCS indefinitely.
+   - **Fix**:
+     1. Granted `roles/storage.objectUser` on `gs://${SNAPSHOT_GCS_BUCKET}` to `serviceAccount:service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com` in [`deploy_standalone.sh`](deploy_standalone.sh) (confirmed on live cluster: stuck `PodSnapshot` CRs immediately cleared and `gs://.../e22faec7-c1ed-4f19-8548-b1f148fdd575/` was deleted from GCS).
+     2. Added `ownerReferences` (`Workspace/<name>`) to `PodSnapshot` CRs and `retentionConfig: {lastAccessTimeout: "7d"}` to `PodSnapshotPolicy` in [`internal/snapshot/snapshot.go`](internal/snapshot/snapshot.go), plus a 14-day GCS Object Lifecycle `Delete` rule in [`deploy_standalone.sh`](deploy_standalone.sh).
+
+---
+
 ## 2026-09-15 E2E Distributed ML Verification (`distributed_tpu_example.ipynb` on Standalone GKE)
 
-- Cluster: `sizhang-gke-dev` / `us-west1` / `kubeflow-notebooks`, GKE `1.35.7-gke.1222000`, Dataplane V2, Gateway API Standard (`gke-l7-global-external-managed`), Workload Identity (`sizhang-gke-dev.svc.id.goog`).
-- Tenant Namespace: `kubeflow-user`, Pilot User: `sizhang@google.com`, Artifact Registry: `us-west1-docker.pkg.dev/sizhang-gke-dev/kubeflow-repo`, GCS Bucket: `gs://kubeflow-user-bucket`.
+- Cluster: `pilot-gke-dev` / `us-west1` / `kubeflow-notebooks`, GKE `1.35.7-gke.1222000`, Dataplane V2, Gateway API Standard (`gke-l7-global-external-managed`), Workload Identity (`pilot-gke-dev.svc.id.goog`).
+- Tenant Namespace: `kubeflow-user`, Pilot User: `pilot-user@example.com`, Artifact Registry: `us-west1-docker.pkg.dev/pilot-gke-dev/kubeflow-repo`, GCS Bucket: `gs://kubeflow-user-bucket`.
 - Deployed via `./gke/deploy_standalone.sh` and `./gke/build_jupyterlab.sh` without Istio.
 - Workspace pod `ws-test-workspace-md2wx-0` created in `kubeflow-user` with `WorkspaceKind/jupyterlab` (`jupyterlab-cpu`, `small_cpu`) and Bound 10 GiB PVC `workspace-pvc` (`StorageClass/notebooks-gke-rwo`).
 

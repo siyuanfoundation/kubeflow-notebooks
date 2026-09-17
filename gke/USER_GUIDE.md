@@ -101,7 +101,8 @@ export CERTIFICATE_MAP="notebooks-gke"
 export CONTEXT="gke_${PROJECT}_${LOCATION}_${CLUSTER}"
 export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}"
 export TAG="pilot-$(date -u +%Y%m%d%H%M%S)"
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"    # Shared GCS bucket for distributed_tpu_example.ipynb
+export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"              # Shared GCS bucket for distributed_tpu_example.ipynb (Spark ETL & TPU data)
+export SNAPSHOT_GCS_BUCKET="${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GCS bucket for GKE Pod Snapshots (stateful Pause/Resume)
 ```
 
 Authenticate `kubectl` to your cluster:
@@ -653,11 +654,161 @@ kubectl --context="${CONTEXT}" get workspaces,sparkconnects,trainjobs,jobsets,de
 
 ---
 
-## 7. VS Code Jupyter Extension (Desktop Endpoint)
+## 7. Stateful Workspace Pause & Resume with GKE Pod Snapshots
+
+GKE Pod Snapshots enable **stateful Pause & Resume** for Kubeflow Workspaces: when a user pauses (stops) a Workspace, GKE checkpoints the running container memory (including live Jupyter Python kernels and in-memory variables) and container rootfs to a dedicated Google Cloud Storage bucket (`gs://${SNAPSHOT_GCS_BUCKET}`) before scaling the Pod down to `0`. When the user resumes (starts) the Workspace, the newly created Pod restores its memory and kernel state directly from the GCS checkpoint.
+
+> [!IMPORTANT]
+> **Separate `SNAPSHOT_GCS_BUCKET` from `GCS_BUCKET`**: Container memory dumps may include in-memory tokens or environment state and have different lifecycle/retention requirements than shared datasets and training outputs (`gs://${GCS_BUCKET}`). Always configure a dedicated `SNAPSHOT_GCS_BUCKET` (default: `${TENANT_NAMESPACE}-snapshots-bucket`) separate from the workload data `GCS_BUCKET` (`${TENANT_NAMESPACE}-bucket`).
+
+This feature is implemented entirely in `gke-access-proxy` via two Kubernetes Mutating Admission Webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`podsnapshot.gke.kubeflow.org/active`), and a background snapshot reconciler—requiring **zero changes** to upstream Kubeflow `Workspace` / `WorkspaceKind` CRDs, `workspaces-controller`, Backend API, or React Frontend.
+
+### Step 7.1: Configure `SNAPSHOT_GCS_BUCKET`, IAM (Workload Identity + GKE Service Agent), & Lifecycle Rule
+
+GKE Pod Snapshots use **two distinct identities** for GCS operations:
+1. **Node-level Checkpoint & Restore**: Uses the **tenant namespace's Workload Identity `principalSet`** (`principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}`).
+2. **Control-plane `PodSnapshot` Finalizer Deletion (`podsnapshot.gke.io/podsnapshot-finalizer`)**: Uses the **GKE Service Agent** (`serviceAccount:service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com`) to list and delete consumed/expired snapshot folders in GCS (`storage.objects.list` and `storage.objects.delete`).
+
+> [!WARNING]
+> **Preventing Unbounded GCS Storage Growth**: If `service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com` is not granted `roles/storage.objectUser` on `gs://${SNAPSHOT_GCS_BUCKET}`, `PodSnapshot` resources remain stuck in `Deleting` (`403 Forbidden` on `storage.objects.list`) and old snapshot files (`checkpoint.img`, `pages.img`) are **never deleted from GCS**. Always grant both bindings below and apply the GCS lifecycle rule.
+
+1. **Create `SNAPSHOT_GCS_BUCKET`, Grant IAM Bindings, & Set a 14-Day GCS Lifecycle Rule**:
+   ```bash
+   export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
+   PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
+
+   # 1. Create the dedicated snapshot GCS bucket if it does not already exist
+   gcloud storage buckets create "gs://${SNAPSHOT_GCS_BUCKET}" \
+     --location="${REGION}" \
+     --project="${PROJECT}" || true
+
+   # 2. Grant objectUser and bucketViewer to the tenant namespace's Workload Identity principalSet (checkpoint & restore)
+   gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+     --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+     --role="roles/storage.objectUser"
+
+   gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+     --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+     --role="roles/storage.bucketViewer"
+
+   # 3. Grant objectUser to the GKE Service Agent so podsnapshot.gke.io/podsnapshot-finalizer
+   #    automatically deletes consumed/expired snapshot folders from GCS
+   gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+     --member="serviceAccount:service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com" \
+     --role="roles/storage.objectUser"
+
+   # 4. Configure a 14-day GCS Object Lifecycle Delete rule as a hard billing backstop
+   cat <<EOF > /tmp/snapshot-lifecycle.json
+   {
+     "rule": [{"action": {"type": "Delete"}, "condition": {"age": 14}}]
+   }
+   EOF
+   gcloud storage buckets update "gs://${SNAPSHOT_GCS_BUCKET}" \
+     --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT}"
+   rm -f /tmp/snapshot-lifecycle.json
+   ```
+
+2. **Configure `SNAPSHOT_GCS_BUCKET` on `gke-access-proxy`**:
+   - When deploying via `deploy_standalone.sh` or `make -C gke plan`, set `"snapshotGCSBucket": "${SNAPSHOT_GCS_BUCKET}"` in your render config JSON (automatically populated from `export SNAPSHOT_GCS_BUCKET=...` by `deploy_standalone.sh`).
+   - To update the bucket on an already-running cluster without re-rendering:
+     ```bash
+     kubectl --context="${CONTEXT}" -n kubeflow-workspaces patch configmap gke-access-proxy \
+       --type merge -p "{\"data\":{\"SNAPSHOT_GCS_BUCKET\":\"${SNAPSHOT_GCS_BUCKET}\"}}"
+     kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
+     ```
+
+### Step 7.2: Configure `PodSnapshotStorageConfig` & `PodSnapshotPolicy` (4-Layer Automatic Cleanup)
+
+GKE Pod Snapshots use a **cluster-scoped** `PodSnapshotStorageConfig` and a **namespace-scoped** `PodSnapshotPolicy`:
+- **`PodSnapshotStorageConfig` (`kubeflow-pod-snapshot-storage-config`)**: Cluster-scoped resource defining the target GCS bucket (`${SNAPSHOT_GCS_BUCKET}`) and prefix (`kubeflow-notebooks`):
+  ```yaml
+  apiVersion: podsnapshot.gke.io/v1
+  kind: PodSnapshotStorageConfig
+  metadata:
+    name: kubeflow-pod-snapshot-storage-config
+  spec:
+    snapshotStorageConfig:
+      gcs:
+        bucket: "${SNAPSHOT_GCS_BUCKET}"
+        path: "kubeflow-notebooks"
+  ```
+- **`PodSnapshotPolicy` (`ws-<workspace-name>-policy`)**: Namespace-scoped resource in `${TENANT_NAMESPACE}` targeting the Workspace's Pods via label selector `notebooks.kubeflow.org/workspace-name: <workspace-name>` with `triggerConfig: {type: manual, postCheckpoint: stop}` and `retentionConfig: {lastAccessTimeout: "7d"}`.
+
+**How Stale Snapshot Data Is Cleaned Up Automatically (4 Layers)**:
+1. **On Resume**: Immediately after a Pod restores from `PodSnapshot/<uuid>`, `gke-access-proxy` deletes the consumed `PodSnapshot` CR, which triggers `podsnapshot.gke.io/podsnapshot-finalizer` (`service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com`) to delete the GCS folder (`checkpoint.img`, `pages.img`, `pages_meta.img`).
+2. **On Workspace Deletion While Paused**: `gke-access-proxy` attaches a Kubernetes `ownerReference` (`Workspace/<name>`) to every created `PodSnapshot` CR. If a user deletes a paused `Workspace` without ever resuming it, Kubernetes Garbage Collection immediately deletes the `PodSnapshot` CR and GKE deletes the GCS files.
+3. **On Abandoned Paused Workspaces (`retentionConfig.lastAccessTimeout: "7d"`)**: `PodSnapshotPolicy` sets `lastAccessTimeout: "7d"`, so GKE automatically expires and deletes any `PodSnapshot` not accessed within 7 days.
+4. **Hard GCS Billing Backstop (`Age: 14` days Lifecycle `Delete` Rule)**: Even if an entire GKE cluster is deleted without running `cleanup_standalone.sh`, GCS Object Lifecycle Management automatically purges any snapshot object older than 14 days in `gs://${SNAPSHOT_GCS_BUCKET}`.
+
+Verify that your `PodSnapshotStorageConfig` and `PodSnapshotPolicy` are `Ready`:
+```bash
+kubectl --context="${CONTEXT}" get podsnapshotstorageconfigs
+kubectl --context="${CONTEXT}" get podsnapshotpolicies -n "${TENANT_NAMESPACE}"
+```
+
+### Step 7.3: Configure `WorkspaceKind` (or Per-Workspace Annotations)
+
+To enable stateful snapshots for all Workspaces of a given kind, annotate the `WorkspaceKind` with `podsnapshot.gke.kubeflow.org/enabled: "true"` and `podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"` (already pre-configured in [`gke/jupyterlab/workspacekind.yaml`](jupyterlab/workspacekind.yaml)):
+
+```yaml
+apiVersion: kubeflow.org/v1beta1
+kind: WorkspaceKind
+metadata:
+  name: jupyterlab
+  annotations:
+    podsnapshot.gke.kubeflow.org/enabled: "true"
+    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+```
+
+*(You can also enable or disable snapshotting for an individual `Workspace` by setting `podsnapshot.gke.kubeflow.org/enabled: "true"` or `"false"` in `Workspace.metadata.annotations`, which takes precedence over the `WorkspaceKind` annotation).*
+
+When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod` webhook automatically:
+1. Sets `spec.runtimeClassName: gvisor` so the Pod schedules onto a gVisor Sandbox node pool (`--sandbox type=gvisor`).
+2. Injects `spec.readinessGates: [{conditionType: "podsnapshot.gke.kubeflow.org/active"}]`.
+3. Ensures `ConfigMap/jupyter-ipc-config` exists in `${TENANT_NAMESPACE}` and mounts it at `/etc/jupyter/jupyter_server_config.py`, configuring JupyterLab to use `selectors.PollSelector()` and Unix domain socket kernel transport (`c.KernelManager.transport = 'ipc'`) for gVisor checkpoint/restore compatibility.
+4. If the `Workspace` has a recorded snapshot (`podsnapshot.gke.kubeflow.org/last-checkpoint-name`), injects `podsnapshot.gke.io/ps-name: <snapshot-name>` onto the `Pod` so GKE restores the container from GCS.
+
+### Step 7.4: Pausing (Checkpointing) & Resuming (Restoring) a Workspace
+
+1. **Pause (Checkpoint) via UI or CLI**:
+   - **UI**: In the Kubeflow Workspaces dashboard, click **Stop** on the running Workspace.
+   - **CLI**:
+     ```bash
+     kubectl --context="${CONTEXT}" patch workspace <workspace-name> -n "${TENANT_NAMESPACE}" \
+       --type merge -p '{"spec":{"paused":true}}'
+     ```
+   - **What happens automatically**:
+     - `POST /mutate-workspace` intercepts the update, keeps `spec.paused: false` temporarily, sets `podsnapshot.gke.kubeflow.org/checkpoint-state: "Checkpointing"`, and immediately flips the Pod's `podsnapshot.gke.kubeflow.org/active` readiness gate and `PodReady` condition to `False` (`READINESS GATES: 0/1`).
+     - Flipping `PodReady` to `False` causes `workspaces-controller` to immediately transition `Workspace.status.state` out of `Running`, which disables the **Connect** button in the UI, hides the **Stop** action, blocks premature **Start** requests, removes the Pod from Service endpoints, and drains open WebSockets.
+     - After the 3-second socket settle window, `gke-access-proxy` creates `PodSnapshotManualTrigger/ws-<workspace-name>-trigger`, waits for GKE to finish uploading the `PodSnapshot` to `gs://${GCS_BUCKET}`, records `podsnapshot.gke.kubeflow.org/last-checkpoint-name: <snapshot-uuid>`, and patches `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`.
+
+2. **Monitor Checkpoint Progress**:
+   ```bash
+   kubectl --context="${CONTEXT}" get workspace <workspace-name> -n "${TENANT_NAMESPACE}" \
+     -o jsonpath='{"paused="}{.spec.paused}{" state="}{.status.state}{" checkpoint-state="}{.metadata.annotations.podsnapshot\.gke\.kubeflow\.org/checkpoint-state}{" last-checkpoint="}{.metadata.annotations.podsnapshot\.gke\.kubeflow\.org/last-checkpoint-name}{"\n"}'
+   kubectl --context="${CONTEXT}" get podsnapshotmanualtriggers,podsnapshots -n "${TENANT_NAMESPACE}"
+   ```
+
+3. **Resume (Restore) via UI or CLI**:
+   - **UI**: Once the Workspace state shows **Paused**, click **Start**.
+   - **CLI**:
+     ```bash
+     kubectl --context="${CONTEXT}" patch workspace <workspace-name> -n "${TENANT_NAMESPACE}" \
+       --type merge -p '{"spec":{"paused":false}}'
+     ```
+   - **What happens automatically**:
+     - `workspaces-controller` scales the `StatefulSet` back to `1`.
+     - `POST /mutate-pod` injects `podsnapshot.gke.io/ps-name: <snapshot-uuid>` onto the new Pod.
+     - Kubelet restores the container memory and live Jupyter kernels from GCS (`Normal GKEPodSnapshotting: Successfully restored the pod from PodSnapshot ...`).
+     - Once restored, `gke-access-proxy` sets `podsnapshot.gke.kubeflow.org/active = True` (`READINESS GATES: 1/1`), transitions the Workspace back to **Running**, clears the checkpoint annotations, and deletes the consumed `PodSnapshot` and `PodSnapshotManualTrigger` resources.
+
+---
+
+## 8. VS Code Jupyter Extension (Desktop Endpoint)
 
 The optional desktop endpoint allows standard VS Code (`ms-toolsai.jupyter`) to connect to running workspaces using Kubernetes-minted connection tokens. IAP continues to protect browser access and token issuance, while a separate desktop backend validates short-lived tokens without exposing dashboard APIs.
 
-### Step 7.1: Enable the Desktop Endpoint
+### Step 8.1: Enable the Desktop Endpoint
 Choose a second, dedicated DNS name (e.g., `connect.example.com` or `connect.${ADDRESS}.sslip.io`) pointing at the same global external IP `${ADDRESS}`, create a Certificate Manager certificate and map entry, and render the desktop plan:
 
 ```bash
@@ -683,7 +834,7 @@ kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/gke-access-proxy --timeout=5m
 ```
 
-### Step 7.2: Connect from VS Code
+### Step 8.2: Connect from VS Code
 1. Open `https://${NOTEBOOK_HOST}/workspaces/connections` in your browser and sign in with Google.
 2. Select your running workspace, port (`jupyterlab`), and duration, then click **Generate connection** and **Copy URL**.
 3. In VS Code, open any `.ipynb` notebook and select **Select Kernel > Select Another Kernel > Existing Jupyter Server**, then paste the copied URL (including `?token=`).
@@ -700,7 +851,7 @@ root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TL
 
 ---
 
-## 8. Enrolling Additional Users
+## 9. Enrolling Additional Users
 
 IAP admission and Kubernetes RBAC are configured as independent layers:
 1. **Grant IAP Admission (Google Group or Individual User)**:
@@ -720,21 +871,21 @@ IAP admission and Kubernetes RBAC are configured as independent layers:
 
 ---
 
-## 9. Teardown & Cleanup
+## 10. Teardown & Cleanup
 
-To remove all deployed components cleanly using the automated cleanup script:
+To remove all deployed components (including the `gke-workspace-snapshot-mutating-webhook`, `PodSnapshot*` custom resources, and tenant `ConfigMap/jupyter-ipc-config`) cleanly using the automated cleanup script:
 
 ```bash
 ./gke/cleanup_standalone.sh
 ```
-To also delete the global external IP address and Google Certificate Manager certificate map:
+To also delete the GKE Pod Snapshot GCS bucket (`gs://${SNAPSHOT_GCS_BUCKET}`), global external IP address, and Google Certificate Manager certificate map:
 ```bash
-DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.sh
+DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.sh
 ```
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Resolution |
 | --- | --- |
@@ -751,14 +902,14 @@ DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.sh
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |
 | VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
 | Spark or TPU pods fail to create in `${TENANT_NAMESPACE}` | Verify `gke/manifests/pilot/access.yaml` has been applied to `${TENANT_NAMESPACE}` (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
-| GCS permission denied (`403`) during Spark ETL or TPU training | Verify Workload Identity IAM binding on `gs://${GCS_BUCKET}` for `principalSet://.../namespace/${TENANT_NAMESPACE}` (Section 6.1). |
+| GCS permission denied (`403`) during Spark ETL, TPU training, or `PodSnapshotPolicy` `_perm_check` | Verify both `roles/storage.objectUser` and `roles/storage.bucketViewer` are granted on `gs://${GCS_BUCKET}` to `principalSet://.../namespace/${TENANT_NAMESPACE}` (Sections 6.1 and 7.1). |
 
 Inspect conditions and error messages without printing Secrets, access tokens,
 OAuth state values, or cookies. Keep notebook data when investigating failures.
 
 ---
 
-## 11. Security and Operational Limits
+## 12. Security and Operational Limits
 
 The pilot has verified browser login, kernel and terminal WebSockets, file
 persistence across pause/resume, selected cross-tenant/forged-header denials,

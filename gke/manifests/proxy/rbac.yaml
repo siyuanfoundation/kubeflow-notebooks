@@ -13,7 +13,23 @@ rules:
     verbs: [create]
   - apiGroups: [kubeflow.org]
     resources: [workspacekinds]
-    verbs: [get]
+    verbs: [get, list, watch]
+  - apiGroups: [kubeflow.org]
+    resources: [workspaces]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [""]
+    resources: [pods, pods/status]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [podsnapshot.gke.io]
+    resources:
+      - podsnapshotstorageconfigs
+      - podsnapshotpolicies
+      - podsnapshotmanualtriggers
+      - podsnapshots
+    verbs: [get, list, watch, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

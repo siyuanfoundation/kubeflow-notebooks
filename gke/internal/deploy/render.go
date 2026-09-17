@@ -34,6 +34,7 @@ type Config struct {
 	IAPAudience                   string            `json:"iapAudience"`
 	KubeClientQPS                 float64           `json:"kubeClientQPS,omitempty"`
 	KubeClientBurst               int               `json:"kubeClientBurst,omitempty"`
+	SnapshotGCSBucket             string            `json:"snapshotGCSBucket,omitempty"`
 	Tenants                       []string          `json:"tenants"`
 	Images                        map[string]string `json:"images"`
 }
@@ -175,10 +176,22 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 			}
 			for _, resource := range resources {
 				if resource.GetKind() == "NetworkPolicy" {
-					if resource.GetName() == "gke-proxy-ingress" && config.DesktopHostname != "" {
+					if resource.GetName() == "gke-proxy-ingress" {
 						ingress, _, _ := unstructured.NestedSlice(resource.Object, "spec", "ingress")
-						rule := ingress[0].(map[string]any)
-						rule["ports"] = append(rule["ports"].([]any), map[string]any{"protocol": "TCP", "port": int64(8081)})
+						if config.DesktopHostname != "" {
+							rule := ingress[0].(map[string]any)
+							rule["ports"] = append(rule["ports"].([]any), map[string]any{"protocol": "TCP", "port": int64(8081)})
+						}
+						ingress = append(ingress, map[string]any{
+							"from": []any{
+								map[string]any{"ipBlock": map[string]any{"cidr": config.ControlPlaneCIDR}},
+								map[string]any{
+									"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "kube-system"}},
+									"podSelector":       map[string]any{"matchLabels": map[string]any{"k8s-app": "konnectivity-agent"}},
+								},
+							},
+							"ports": []any{map[string]any{"protocol": "TCP", "port": int64(9443)}},
+						})
 						_ = unstructured.SetNestedSlice(resource.Object, ingress, "spec", "ingress")
 					}
 					result = append(result, resource)
@@ -237,14 +250,19 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 		if burst == 0 {
 			burst = 200
 		}
+		snapshotBucket := config.SnapshotGCSBucket
+		if snapshotBucket == "" && len(config.Tenants) > 0 && config.Tenants[0] != "" {
+			snapshotBucket = config.Tenants[0] + "-snapshots-bucket"
+		}
 		result = append([]unstructured.Unstructured{object("v1", "ConfigMap", "gke-access-proxy", systemNamespace, map[string]any{"data": map[string]any{
-			"PUBLIC_URL":        "https://" + config.Hostname,
-			"IAP_AUDIENCE":      config.IAPAudience,
-			"FRONTEND_URL":      "http://workspaces-frontend.kubeflow-workspaces.svc:8080",
-			"BACKEND_URL":       "http://workspaces-backend.kubeflow-workspaces.svc:4000",
-			"TENANT_NAMESPACES": strings.Join(config.Tenants, ","),
-			"KUBE_CLIENT_QPS":   strconv.FormatFloat(qps, 'f', -1, 64),
-			"KUBE_CLIENT_BURST": strconv.Itoa(burst),
+			"PUBLIC_URL":          "https://" + config.Hostname,
+			"IAP_AUDIENCE":        config.IAPAudience,
+			"FRONTEND_URL":        "http://workspaces-frontend.kubeflow-workspaces.svc:8080",
+			"BACKEND_URL":         "http://workspaces-backend.kubeflow-workspaces.svc:4000",
+			"TENANT_NAMESPACES":   strings.Join(config.Tenants, ","),
+			"KUBE_CLIENT_QPS":     strconv.FormatFloat(qps, 'f', -1, 64),
+			"KUBE_CLIENT_BURST":   strconv.Itoa(burst),
+			"SNAPSHOT_GCS_BUCKET": snapshotBucket,
 		}})}, result...)
 		if config.DesktopHostname != "" {
 			_ = unstructured.SetNestedField(result[0].Object, "https://"+config.DesktopHostname, "data", "DESKTOP_URL")
