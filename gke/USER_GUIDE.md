@@ -822,6 +822,53 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
      - Kubelet restores the container memory and live Jupyter kernels from GCS (`Normal GKEPodSnapshotting: Successfully restored the pod from PodSnapshot ...`).
      - Once restored, `gke-workspace-snapshot-addon` sets `podsnapshot.gke.kubeflow.org/active = True` (`READINESS GATES: 1/1`), transitions the Workspace back to **Running**, clears the checkpoint annotations, and deletes the consumed `PodSnapshot` and `PodSnapshotManualTrigger` resources.
 
+### Step 7.5: Hardware & Workspace Support for Pause & Resume
+
+> [!IMPORTANT]
+> **Memory-Recoverable Pause & Resume**:
+> - **Supported**: Memory-recoverable pause and resume (preserving in-memory variables and execution state via GKE Pod Snapshots) is **only supported for JupyterLab notebook workspaces (`jupyterlab`) on CPU/GPU hardware**.
+> - **VS Code & Other Workspaces (Stateless Pause & Resume)**: For VS Code (`codeserver`) or other workspace kinds, pause and resume is stateless: pausing scales down the Pod to release compute resources, and resuming starts a fresh Pod. All files and custom Conda environments located on the persistent home volume (`/home/jovyan`) are preserved, but in-memory process execution state and live notebook variables are not saved across restarts.
+> - For in-depth technical analysis, gVisor CRIU constraints, and pilot records, see [CODELAB.md](CODELAB.md).
+
+### Step 7.6: Package Management & Persistence Across Restarts
+
+When a workspace Pod restarts, is rescheduled, or resumes from a stateless pause, the ephemeral container root filesystem (`/`) is recreated, while the user home volume (`/home/jovyan` mounted via PVC) is preserved.
+
+To ensure your Python packages survive restarts and do not consume unnecessary PVC disk quota, the workspace images provide two recommended workflows:
+
+#### 1. Quick Installs in the Base Environment (Zero Baseline Overhead)
+The pre-installed base environment (`/opt/conda`) includes full ML stacks (PyTorch, CUDA, JAX, SciPy, pandas, ipykernel).
+- Running `pip install <package>` in the base environment automatically installs the package into `/home/jovyan/.local/lib/python3.12/site-packages` on your persistent home volume (pre-configured via `/opt/conda/pip.conf`).
+- You do **not** need to pass `--user` manually.
+- Packages installed this way persist across restarts, seamlessly layer on top of the pre-baked base packages, and require **0 MB baseline overhead** (only newly added packages occupy PVC disk space).
+- Executables are placed into `/home/jovyan/.local/bin`, which is pre-configured in `PATH`.
+
+#### 2. Isolated Project Environments Inheriting Base Packages
+If a project needs isolated dependencies without reinstalling or duplicating multi-gigabyte PyTorch/CUDA base packages:
+```bash
+# Create a lightweight virtualenv (~15 MB) that inherits all base packages read-only
+python3 -m venv --system-site-packages /home/jovyan/envs/my_project
+
+# Activate the environment
+source /home/jovyan/envs/my_project/bin/activate
+
+# Install project-specific packages into /home/jovyan/envs/my_project
+pip install <package>
+
+# Optional: Register as a Jupyter kernel for notebooks
+python -m ipykernel install --user --name=my_project --display-name="Python (my_project)"
+```
+
+#### 3. Fully Isolated Conda Environments
+For completely separate Python versions or standalone native Conda packages:
+```bash
+# Note: Always use `conda create` (not `conda install`) to initialize a new environment
+conda create -n my_conda_env python=3.11 -y
+conda activate my_conda_env
+pip install <package>
+```
+All Conda environments are automatically created under `/home/jovyan/.conda/envs` and persist across Pod restarts.
+
 ---
 
 ## 8. VS Code Jupyter Extension (Desktop Endpoint)
@@ -920,6 +967,8 @@ DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.
 | Notebook remains `Pending` | Check node resources, image pull permissions, PVC provisioning, quota, Pod Security, and pod events. |
 | Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update. |
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |
+| In-memory variables or kernel state lost after pause/resume | Memory-recoverable pause and resume is only supported for JupyterLab notebook workspaces on CPU/GPU hardware; other workspaces (such as VS Code) use stateless pause and resume where files on `/home/jovyan` persist but in-memory execution state does not (Step 7.5). |
+| Custom Python packages or Conda environments missing after restart | Packages installed into ephemeral container rootfs (`/opt/conda`) are lost on Pod recreation. In the base environment, `pip` is pre-configured to automatically install into persistent storage (`/home/jovyan/.local/`) so packages persist without flags. For isolated project environments inheriting base packages, use `python3 -m venv --system-site-packages /home/jovyan/envs/<name>` (Step 7.6). |
 | VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
 | Spark or TPU pods fail to create in `${TENANT_NAMESPACE}` | Verify `gke/manifests/pilot/access.yaml` has been applied to `${TENANT_NAMESPACE}` (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
 | GCS permission denied (`403`) during Spark ETL, TPU training, or `PodSnapshotPolicy` `_perm_check` | Verify both `roles/storage.objectUser` and `roles/storage.bucketViewer` are granted on `gs://${GCS_BUCKET}` to `principalSet://.../namespace/${TENANT_NAMESPACE}` (Sections 6.1 and 7.1). |
