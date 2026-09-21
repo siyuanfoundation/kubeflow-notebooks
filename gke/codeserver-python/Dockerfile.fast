@@ -11,6 +11,18 @@ ARG TARGETARCH=amd64
 # Extension version (from Open VSX)
 ARG GEMINICODEASSIST_VERSION=2.100.0
 
+# Install Node.js & Gemini CLI
+USER root
+ARG NODE_VERSION=22.14.0
+RUN case "${TARGETARCH}" in \
+      amd64) NODE_ARCH="x64" ;; \
+      arm64) NODE_ARCH="arm64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}"; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /usr/local --strip-components=1 \
+ && npm install -g @google/gemini-cli@nightly \
+ && gemini --version
+
 USER $NB_UID
 
 ENV PATH="${HOME}/.local/bin:${PATH}"

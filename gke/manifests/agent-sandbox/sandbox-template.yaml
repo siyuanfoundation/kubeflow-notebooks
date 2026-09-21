@@ -1,0 +1,36 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-runtime-template
+  namespace: ${TENANT_NAMESPACE}
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: sandbox-runtime
+        image: ${SANDBOX_RUNTIME_IMAGE}
+        ports:
+        - containerPort: 8888
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+      restartPolicy: OnFailure
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: python-warmpool
+  namespace: ${TENANT_NAMESPACE}
+spec:
+  replicas: ${WARMPOOL_REPLICAS}
+  sandboxTemplateRef:
+    name: python-runtime-template

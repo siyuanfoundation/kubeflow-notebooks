@@ -35,6 +35,17 @@ RUN mkdir -pv ${CONDA_DIR} \
  && chown -R ${NB_USER}:${NB_GID} ${CONDA_DIR} \
  && chown -R ${NB_USER}:${USERS_GID} ${HOME}
 
+# install - nodejs and gemini-cli
+ARG NODE_VERSION=22.14.0
+RUN case "${TARGETARCH}" in \
+      amd64) NODE_ARCH="x64" ;; \
+      arm64) NODE_ARCH="arm64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}"; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /usr/local --strip-components=1 \
+ && npm install -g @google/gemini-cli@nightly \
+ && gemini --version
+
 USER $NB_UID
 
 # install - conda, pip, python
