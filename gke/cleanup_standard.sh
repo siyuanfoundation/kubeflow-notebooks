@@ -62,7 +62,7 @@ fi
 echo "=================================================================="
 echo "Step 4: Deleting Kubeflow Workspaces (Notebooks v2)..."
 echo "=================================================================="
-kubectl delete --namespace kubeflow --filename "https://raw.githubusercontent.com/kubeflow/community-distribution/26.03.1/applications/workspaces/components/centraldashboard/centraldashboard-config.yaml" --ignore-not-found=true || true
+kubectl delete -f "${SCRIPT_DIR}/manifests/centraldashboard-config.yaml" --ignore-not-found=true || true
 kubectl delete -k applications/workspaces/overlays/istio --ignore-not-found=true --wait=false || true
 
 echo "=================================================================="

@@ -160,7 +160,7 @@ echo "Step 5: Deploying Kubeflow Workspaces (Notebooks v2)..."
 echo "=================================================================="
 kubectl apply -k applications/workspaces/overlays/istio
 
-kubectl apply --namespace kubeflow --filename "https://raw.githubusercontent.com/kubeflow/community-distribution/26.03.1/applications/workspaces/components/centraldashboard/centraldashboard-config.yaml"
+kubectl apply -f "${SCRIPT_DIR}/manifests/centraldashboard-config.yaml"
 
 # ==============================================================================
 # Step 6: Deploy Kubeflow Trainer (v2)

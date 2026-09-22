@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-config
+  namespace: kubeflow
+data:
+  settings: |-
+    {
+      "DASHBOARD_FORCE_IFRAME": true
+    }
+  links: |-
+    {
+        "menuLinks": [
+            {
+                "icon": "book",
+                "items": [
+                    {
+                        "link": "/workspaces/",
+                        "text": "Workspaces",
+                        "type": "item"
+                    },
+                    {
+                        "link": "/workspaces/workspacekinds/",
+                        "text": "WorkspaceKinds",
+                        "type": "item"
+                    }
+                ],
+                "text": "Workspaces",
+                "type": "section"
+            }
+        ],
+        "externalLinks": [],
+        "documentationItems": [
+            {
+                "desc": "The Kubeflow website",
+                "link": "https://www.kubeflow.org/",
+                "text": "Kubeflow Website"
+            },
+            {
+                "desc": "Documentation for Kubeflow Notebooks & Workspaces",
+                "link": "https://www.kubeflow.org/docs/components/notebooks/",
+                "text": "Kubeflow Notebooks Documentation"
+            },
+            {
+                "desc": "Documentation for Kubeflow Trainer",
+                "link": "https://www.kubeflow.org/docs/components/training/",
+                "text": "Kubeflow Trainer Documentation"
+            }
+        ],
+        "quickLinks": [
+            {
+                "desc": "Kubeflow Workspaces",
+                "link": "/workspaces/",
+                "text": "Manage Workspaces"
+            }
+        ]
+    }

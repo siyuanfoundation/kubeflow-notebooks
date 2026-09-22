@@ -214,8 +214,8 @@ Deploy the Workspaces controller, backend, and frontend:
 ```bash
 kubectl apply -k applications/workspaces/overlays/istio
 
-# Add the Kubeflow Workspaces tab to the Central Dashboard
-kubectl apply --namespace kubeflow --filename "https://raw.githubusercontent.com/kubeflow/community-distribution/26.03.1/applications/workspaces/components/centraldashboard/centraldashboard-config.yaml"
+# Configure Central Dashboard left menu for Workspaces (removing uninstalled components)
+kubectl apply -f /usr/local/google/home/sizhang/Projects/kubeflow/istio-notebook/gke/manifests/centraldashboard-config.yaml
 ```
 *(All components run securely with default Istio sidecars and mTLS enabled.)*
 
